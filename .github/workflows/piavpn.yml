@@ -35,12 +35,15 @@ jobs:
           PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
         run: |
           echo "Downloading PIA client..."
-          # Download the official Linux installer (.run file)
+          # Download the official Linux installer (.run file); adjust version if needed.
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           sudo chmod +x pia.run
-          echo "Installing PIA client in CLI mode..."
-          sh pia.run --cli || true
-          # Verify that piactl is installed.
+          # Ensure /usr/local/bin exists for the piactl symlink
+          sudo mkdir -p /usr/local/bin
+          echo "Installing PIA client in non-interactive mode..."
+          # Run the installer: accept the license and avoid spawning X11
+          sh pia.run --accept --nox11 || true
+          # Check that piactl exists
           which piactl || { echo "piactl not found. Exiting."; exit 1; }
           echo "Logging into PIA..."
           sudo piactl login "$PIA_USERNAME" "$PIA_PASSWORD"
