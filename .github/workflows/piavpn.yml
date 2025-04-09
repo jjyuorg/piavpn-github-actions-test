@@ -15,20 +15,20 @@ jobs:
   rumble-vpn:
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:24.04
-      # Attempt to enable systemd by using privileged mode, tmpfs mounts, cgroup bind, and setting the entrypoint.
-      options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro --entrypoint /sbin/init
+      image: ghcr.io/catthehacker/ubuntu:systemd-focal
+      # These options help enable systemd inside the container.
+      options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Check systemd and D-Bus status
+      - name: Debug Systemd and D-Bus Status
         run: |
-          echo "Systemd version:"
+          echo "=== Systemd Version ==="
           systemctl --version || true
-          echo "Systemd status:"
+          echo "=== Systemctl Status ==="
           systemctl status || true
-          echo "D-Bus List Names:"
+          echo "=== D-Bus List Names ==="
           dbus-send --system --dest=org.freedesktop.DBus --print-reply / org.freedesktop.DBus.ListNames || true
 
       - name: Install Essential Dependencies
@@ -48,20 +48,25 @@ jobs:
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           chmod +x pia.run
 
+          # Start a system D-Bus daemon (ignore errors).
           echo "Starting system dbus daemon..."
           sudo dbus-daemon --system --fork || true
 
+          # Create a non-root user if needed.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
+          # Configure passwordless sudo for piauser.
           echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
 
           echo "Running PIA installer as piauser..."
+          # Run the installer as piauser and ignore nonzero exit codes (systemd parts may fail).
           su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
 
           echo "Listing extracted files for debugging:"
           ls -R /home/piauser
-          
+
+          # Locate the piactl binary (search both /home/piauser and /opt/piavpn).
           PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
             echo "piactl not found after installation. Exiting."
@@ -77,6 +82,7 @@ jobs:
           echo "piactl installed at $(which piactl)"
 
           echo "Logging into PIA (verbose, timeout 90 sec)..."
+          # Write credentials to a temporary file.
           echo -e "${PIA_USERNAME}\n${PIA_PASSWORD}" > pia_credentials.txt
           sudo piactl login --timeout 90 --debug pia_credentials.txt 2>&1 | tee piactl_login.log
           rm pia_credentials.txt
