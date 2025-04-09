@@ -42,8 +42,8 @@ jobs:
             apt-get update
             apt-get install -y nodejs
 
-            echo 'Installing Puppeteer dependencies...'
-            apt-get install -y libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 libnss3 libcups2 libxcursor1 libxvfb1 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libnotify4 libatspi2.0-0 libasound2
+            echo 'Installing Chromium for Puppeteer...'
+            apt-get install -y chromium-browser
             
             echo 'Setting up OpenVPN connection to PIA...'
             mkdir -p /tmp/pia
@@ -92,9 +92,9 @@ jobs:
                 echo \"VPN connected successfully. Setting up Puppeteer...\"
                 cd /workspace
                 
-                # Install Puppeteer
+                # Install Puppeteer with Chromium option
                 npm init -y
-                npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+                PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
                 
                 # Create Puppeteer script
                 cat > rumble-visit.js << 'PUPPETEER_SCRIPT'
@@ -121,6 +121,7 @@ jobs:
                     console.log(`Launching browser to visit ${videoUrl}...`);
                     const browser = await puppeteer.launch({
                         headless: 'new',
+                        executablePath: '/usr/bin/chromium-browser',
                         args: ['--no-sandbox', '--disable-setuid-sandbox'],
                     });
                 
