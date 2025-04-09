@@ -7,36 +7,133 @@ on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: "Rumble Video URL"
+        description: 'Rumble Video URL'
         required: true
-        default: "https://rumble.com/v6r0vz6-automate.html"
+        default: 'https://rumble.com/v6r0vz6-automate.html'
 
 jobs:
   rumble-vpn:
     runs-on: ubuntu-latest
+    
+    # Run inside an Ubuntu container with privileges so we can start OpenVPN
+    container:
+      image: ubuntu:latest
+      options: --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+    
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Create Required Directories
+      - name: Install Basic Dependencies
         run: |
-          mkdir -p screenshots
-          mkdir -p logs
-          chmod 777 screenshots logs
+          apt-get update
+          apt-get install -y wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg
+
+          # Libraries needed for Puppeteer's bundled Chromium
+          apt-get install -y \
+            fonts-liberation \
+            libatk-bridge2.0-0 \
+            libatk1.0-0 \
+            libcups2 \
+            libdbus-1-3 \
+            libexpat1 \
+            libfontconfig1 \
+            libgbm1 \
+            libglib2.0-0 \
+            libgtk-3-0 \
+            libnss3 \
+            libpangocairo-1.0-0 \
+            libx11-6 \
+            libx11-xcb1 \
+            libxcb1 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxext6 \
+            libxfixes3 \
+            libxrandr2 \
+            libxrender1 \
+            libxss1 \
+            libxtst6 \
+            libasound2 \
+            libasound2-plugins \
+            libpulse0 \
+            libxkbcommon0 \
+            xdg-utils \
+            lsb-release
+
+          # Install Node.js 20.x
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y nodejs
+
+      - name: Configure and Start PIA VPN
+        env:
+          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
+          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
+        run: |
+          mkdir -p /tmp/pia
+          cd /tmp/pia
+
+          echo "Downloading PIA OpenVPN configs..."
+          wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
+          unzip -q openvpn.zip
+
+          echo "Creating credentials file..."
+          echo "$PIA_USERNAME" > auth.txt
+          echo "$PIA_PASSWORD" >> auth.txt
+          chmod 600 auth.txt
+
+          echo "Updating .ovpn configuration for DNS and credentials..."
+          SERVER_FILE=/tmp/pia/us_east.ovpn
+          sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' $SERVER_FILE
+          echo 'dhcp-option DNS 8.8.8.8' >> $SERVER_FILE
+          echo 'dhcp-option DNS 8.8.4.4' >> $SERVER_FILE
+
+          echo "Starting OpenVPN in the background..."
+          openvpn --config $SERVER_FILE --daemon --log /workspace/openvpn.log
+
+          echo "Waiting for VPN interface (tun0)..."
+          for i in $(seq 1 12); do
+            echo "Attempt $i..."
+            if ip a | grep -q tun0; then
+              echo "VPN interface detected!"
+              
+              # Override DNS resolvers
+              echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+              echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
+              
+              break
+            fi
+            if [ $i -eq 12 ]; then
+              echo "VPN connection failed"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # Print external IP for debugging
+          EXTERNAL_IP=$(curl -s https://api.ipify.org)
+          echo "VPN IP: $EXTERNAL_IP"
+
+      - name: Install Puppeteer
+        run: |
+          npm init -y
+          # Puppeteer (full) downloads its own Chromium. The stealth plugin helps avoid detection.
+          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+          mkdir -p scripts screenshots logs
 
       - name: Create Puppeteer Script
         run: |
-          cat > rumble-visit.js << 'EOF'
+          cat > scripts/rumble-visit.js << 'EOF'
           const puppeteer = require('puppeteer-extra');
           const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           const fs = require('fs');
-          
+
           puppeteer.use(StealthPlugin());
-          
+
           function sleep(ms) {
               return new Promise(resolve => setTimeout(resolve, ms));
           }
-          
+
           async function safeScreenshot(page, path) {
               try {
                   await page.screenshot({ path });
@@ -45,24 +142,24 @@ jobs:
                   console.error(`Failed to take screenshot ${path}: ${err.message}`);
               }
           }
-          
+
           async function visitRumble(videoUrl) {
               console.log(`Launching browser to visit ${videoUrl}...`);
               const browser = await puppeteer.launch({
                   headless: 'new',
-                  executablePath: '/usr/bin/chromium-browser',
+                  executablePath: require('puppeteer').executablePath(), // use Puppeteer's Chromium
                   args: ['--no-sandbox', '--disable-setuid-sandbox'],
               });
-          
+
               const page = await browser.newPage();
               await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
               await page.setCacheEnabled(false);
-          
+
               console.log('Navigating to Rumble video...');
               await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
               await sleep(3000);
               await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
-          
+
               const playButtonSelectors = [
                   '.bigPlayUIInner.ctp',
                   'button[aria-label="Play"]',
@@ -70,7 +167,7 @@ jobs:
                   '.icon-play',
                   'div[class*=play]'
               ];
-          
+
               let playButton = null;
               for (const selector of playButtonSelectors) {
                   playButton = await page.$(selector);
@@ -82,12 +179,12 @@ jobs:
                       break;
                   }
               }
-          
+
               if (!playButton) {
                   console.warn('Play button not found. Proceeding without clicking.');
               }
-          
-              // Watch for 30 seconds
+
+              // Watch the video for ~30 seconds, taking screenshots along the way
               for (let t = 5; t <= 30; t += 5) {
                   await sleep(5000);
                   await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
@@ -100,14 +197,15 @@ jobs:
           
                   console.log(`Video playing status at ${t}s: ${isPlaying}`);
               }
-          
+
+              // Save final HTML content to logs
               const finalHtml = await page.content();
               fs.writeFileSync(`./logs/final_page_${Date.now()}.html`, finalHtml);
-              
+
               await browser.close();
               console.log('Visit completed successfully');
           }
-          
+
           async function main() {
               try {
                   const videoUrl = process.argv[2] || 'https://rumble.com/v6r0vz6-automate.html';
@@ -117,149 +215,15 @@ jobs:
                   process.exit(1);
               }
           }
-          
+
           main();
           EOF
-          chmod 644 rumble-visit.js
 
-      - name: Run VPN Setup
+      - name: Run Puppeteer Script
         run: |
-          docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined -v $(pwd):/workspace ubuntu:latest bash -c "
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            cd /workspace
-            
-            echo 'Installing basic dependencies...'
-            apt-get update
-            apt-get install -y wget unzip openvpn ca-certificates iproute2 curl dnsutils
-            
-            echo 'Setting up OpenVPN connection to PIA...'
-            mkdir -p /tmp/pia
-            cd /tmp/pia
-            wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
-            unzip -q openvpn.zip
-            
-            echo 'Creating credentials file...'
-            echo '${{ secrets.PIA_USERNAME }}' > /tmp/pia/auth.txt
-            echo '${{ secrets.PIA_PASSWORD }}' >> /tmp/pia/auth.txt
-            chmod 600 /tmp/pia/auth.txt
-            
-            echo 'Configuring OpenVPN with explicit DNS settings...'
-            SERVER_FILE=/tmp/pia/us_east.ovpn
-            sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
-            echo 'dhcp-option DNS 8.8.8.8' >> \$SERVER_FILE
-            echo 'dhcp-option DNS 8.8.4.4' >> \$SERVER_FILE
-            
-            echo 'Starting OpenVPN connection...'
-            openvpn --config \$SERVER_FILE --daemon --log /workspace/logs/openvpn.log
-            
-            echo 'Waiting for VPN interface to establish...'
-            for i in \$(seq 1 12); do
-              echo \"Checking for VPN interface (attempt \$i)...\"
-              if ip a | grep -q tun0; then
-                echo \"VPN interface detected!\"
-                ip a show tun0
-                
-                # Manually set DNS
-                echo 'nameserver 8.8.8.8' > /etc/resolv.conf
-                echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
-                
-                # Testing DNS resolution
-                echo \"Testing DNS resolution:\"
-                dig +short google.com
-                
-                # Testing IP service
-                echo \"External IP:\"
-                EXTERNAL_IP=\$(curl -s https://api.ipify.org)
-                echo \$EXTERNAL_IP > /workspace/logs/vpn_ip.txt
-                echo \"VPN connected successfully!\"
-                chmod -R 777 /workspace/logs
-                exit 0
-              fi
-              
-              if [ \$i -eq 12 ]; then
-                echo \"VPN Connection Failed\"
-                cat /tmp/openvpn.log > /workspace/logs/openvpn_failure.log
-                chmod -R 777 /workspace/logs
-                exit 1
-              fi
-              
-              sleep 5
-            done
-          "
-
-      - name: Run Puppeteer through VPN
-        run: |
-          docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined -v $(pwd):/workspace ubuntu:latest bash -c "
-            set -e
-            export DEBIAN_FRONTEND=noninteractive
-            cd /workspace
-            
-            # Install basic dependencies first
-            apt-get update
-            apt-get install -y wget unzip curl gnupg ca-certificates openvpn iproute2 dnsutils
-            
-            echo 'Installing Node.js and Chromium...'
-            mkdir -p /etc/apt/keyrings
-            curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-            echo 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main' > /etc/apt/sources.list.d/nodesource.list
-            apt-get update
-            apt-get install -y nodejs chromium-browser
-            
-            echo 'Setting up OpenVPN connection to PIA...'
-            mkdir -p /tmp/pia
-            cd /tmp/pia
-            wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
-            unzip -q openvpn.zip
-            
-            echo 'Creating credentials file...'
-            echo '${{ secrets.PIA_USERNAME }}' > /tmp/pia/auth.txt
-            echo '${{ secrets.PIA_PASSWORD }}' >> /tmp/pia/auth.txt
-            chmod 600 /tmp/pia/auth.txt
-            
-            echo 'Configuring OpenVPN with explicit DNS settings...'
-            SERVER_FILE=/tmp/pia/us_east.ovpn
-            sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
-            echo 'dhcp-option DNS 8.8.8.8' >> \$SERVER_FILE
-            echo 'dhcp-option DNS 8.8.4.4' >> \$SERVER_FILE
-            
-            echo 'Starting OpenVPN connection...'
-            openvpn --config \$SERVER_FILE --daemon --log /workspace/logs/puppeteer_vpn.log
-            
-            echo 'Waiting for VPN interface to establish...'
-            for i in \$(seq 1 12); do
-              echo \"Checking for VPN interface (attempt \$i)...\"
-              if ip a | grep -q tun0; then
-                echo \"VPN interface detected!\"
-                
-                # Manually set DNS
-                echo 'nameserver 8.8.8.8' > /etc/resolv.conf
-                echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
-                
-                # Setup and run Puppeteer
-                cd /workspace
-                npm init -y
-                PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
-                
-                # Run the Puppeteer script
-                VIDEO_URL='${{ github.event.inputs.video_url || 'https://rumble.com/v6r0vz6-automate.html' }}'
-                echo \"Visiting URL: \$VIDEO_URL\"
-                node rumble-visit.js \"\$VIDEO_URL\" | tee ./logs/puppeteer.log
-                
-                chmod -R 777 /workspace/screenshots
-                chmod -R 777 /workspace/logs
-                echo \"Puppeteer execution completed\"
-                exit 0
-              fi
-              
-              if [ \$i -eq 12 ]; then
-                echo \"VPN Connection Failed for Puppeteer\"
-                exit 1
-              fi
-              
-              sleep 5
-            done
-          "
+          VIDEO_URL="${{ github.event.inputs.video_url || 'https://rumble.com/v6r0vz6-automate.html' }}"
+          echo "Visiting Rumble URL: $VIDEO_URL"
+          node scripts/rumble-visit.js "$VIDEO_URL" | tee ./logs/puppeteer.log
 
       - name: Upload Artifacts
         if: always()
