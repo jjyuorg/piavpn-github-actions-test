@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ubuntu:24.04
-      # Enable systemd by mounting /run, /run/lock, /sys/fs/cgroup and setting the entrypoint.
+      # Enable systemd by mounting /run, /run/lock, and /sys/fs/cgroup and set the entrypoint to /sbin/init.
       options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro --entrypoint /sbin/init
     steps:
       - name: Checkout Repository
@@ -38,29 +38,36 @@ jobs:
           echo "Downloading PIA client..."
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           chmod +x pia.run
-          # Start system D-Bus so installer’s systemd calls can connect.
+
+          # Start system dbus to support any systemd calls by the installer.
           echo "Starting system dbus daemon..."
           sudo dbus-daemon --system --fork
-          # Create non-root user 'piauser' if it doesn't already exist.
+
+          # Create non-root user 'piauser' if not present.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
-          # Configure passwordless sudo for piauser.
+
+          # Configure passwordless sudo for piauser to avoid sudo prompts inside the installer.
           echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
-          echo "Extracting PIA files as piauser..."
-          # Use --noexec to extract files (without executing embedded script) to a target directory.
-          su - piauser -c "$(pwd)/pia.run --noexec --target /home/piauser/pia_client --accept --nox11" || true
-          echo "Listing extracted files in /home/piauser/pia_client for debugging:"
-          ls -R /home/piauser/pia_client
-          # Look for piactl using a case-insensitive search.
-          PIACTL_PATH=$(find /home/piauser/pia_client -iname "piactl" -type f | head -1)
+
+          echo "Running PIA installer as piauser..."
+          # Run the installer with --accept and --nox11. We ignore its nonzero exit code.
+          su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
+
+          echo "Listing extracted files for debugging:"
+          ls -R /home/piauser
+
+          # Search both /home/piauser and /opt/piavpn for the piactl binary (case-insensitive).
+          PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
-            echo "piactl not found after extraction. Exiting."
+            echo "piactl not found after installation. Exiting."
             exit 1
           fi
           echo "piactl found at: $PIACTL_PATH"
           sudo cp "$PIACTL_PATH" /usr/local/bin/
           echo "piactl installed at $(which piactl)"
+
           echo "Logging into PIA..."
           sudo piactl login "$PIA_USERNAME" "$PIA_PASSWORD"
           echo "Connecting to PIA..."
