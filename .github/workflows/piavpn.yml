@@ -8,6 +8,13 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+      - name: Test Network Connectivity
+        run: |
+          echo "Testing basic network connectivity..."
+          curl -v https://api.github.com/meta | head -20
+          echo "Testing connection to port 53 (UDP/DNS)..."
+          dig @8.8.8.8 google.com
+          
       - name: Run PIA VPN Connection
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
@@ -16,31 +23,35 @@ jobs:
             set -e
             export DEBIAN_FRONTEND=noninteractive
             echo "Installing dependencies..."
-            apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2
+            apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2 dnsutils
             
-            echo "Testing DNS resolution in container..."
-            echo "Host GitHub.com resolves to: $(getent hosts github.com | head -1 || echo "Failed to resolve")"
+            echo "Testing network from inside Docker container..."
+            echo "Current network interfaces:"
+            ip a
+            echo "Testing DNS:"
+            dig github.com || echo "DNS lookup failed"
             
             echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
             
-            # Create minimal OpenVPN config without using DNS hostnames
+            # Create minimal OpenVPN config using UDP port 53 (DNS port - likely to be allowed)
             echo "client" > /tmp/pia/pia.ovpn
             echo "dev tun" >> /tmp/pia/pia.ovpn
-            echo "proto tcp" >> /tmp/pia/pia.ovpn
-            # Using direct IP address instead of hostname (New York server)
-            echo "remote 193.37.253.181 443" >> /tmp/pia/pia.ovpn
+            echo "proto udp" >> /tmp/pia/pia.ovpn
+            # Try using UDP port 53 (DNS port)
+            echo "remote 193.37.253.181 53" >> /tmp/pia/pia.ovpn
             echo "resolv-retry infinite" >> /tmp/pia/pia.ovpn
             echo "nobind" >> /tmp/pia/pia.ovpn
             echo "persist-key" >> /tmp/pia/pia.ovpn
             echo "persist-tun" >> /tmp/pia/pia.ovpn
-            echo "cipher aes-128-cbc" >> /tmp/pia/pia.ovpn
-            echo "auth sha1" >> /tmp/pia/pia.ovpn
+            # Use modern cipher configuration
+            echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305" >> /tmp/pia/pia.ovpn
+            echo "auth SHA256" >> /tmp/pia/pia.ovpn
             echo "tls-client" >> /tmp/pia/pia.ovpn
             echo "remote-cert-tls server" >> /tmp/pia/pia.ovpn
             echo "auth-user-pass /tmp/pia/auth.txt" >> /tmp/pia/pia.ovpn
             echo "comp-lzo" >> /tmp/pia/pia.ovpn
-            echo "verb 3" >> /tmp/pia/pia.ovpn
+            echo "verb 4" >> /tmp/pia/pia.ovpn
             echo "reneg-sec 0" >> /tmp/pia/pia.ovpn
             # Add explicit DNS settings
             echo "dhcp-option DNS 8.8.8.8" >> /tmp/pia/pia.ovpn
@@ -55,11 +66,14 @@ jobs:
             echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
+            echo "Displaying final OpenVPN config (with credentials redacted):"
+            cat /tmp/pia/pia.ovpn
+            
             echo "Starting OpenVPN connection..."
             openvpn --config /tmp/pia/pia.ovpn --daemon --log /tmp/openvpn.log
             
             echo "Waiting for VPN interface to establish..."
-            for i in $(seq 1 10); do
+            for i in $(seq 1 15); do
               echo "Checking for VPN interface (attempt $i)..."
               if ip a | grep -q tun0; then
                 echo "VPN interface detected!"
@@ -67,12 +81,12 @@ jobs:
                 echo "VPN connection successful!"
                 exit 0
               fi
-              # Show partial logs every few attempts
+              # Show logs every few attempts
               if [ $((i % 3)) -eq 0 ]; then
-                echo "Current OpenVPN log:"
-                tail -n 10 /tmp/openvpn.log
+                echo "Current OpenVPN log (attempt $i):"
+                tail -n 15 /tmp/openvpn.log
               fi
-              sleep 3
+              sleep 4
             done
             
             echo "VPN connection timed out. Full OpenVPN logs:"
