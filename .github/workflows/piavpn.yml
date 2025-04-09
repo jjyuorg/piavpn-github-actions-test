@@ -21,16 +21,26 @@ jobs:
       - name: Create Script Directory
         run: |
           mkdir -p screenshots
+          mkdir -p logs
 
-      - name: Run OpenVPN Connection and Basic Test
+      - name: Run OpenVPN Connection and Network Diagnostics
         run: |
-          docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined -v $(pwd):/workspace ubuntu:latest bash -c "
+          docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c "
             set -e
             export DEBIAN_FRONTEND=noninteractive
             
             echo 'Installing basic dependencies...'
             apt-get update
-            apt-get install -y wget unzip openvpn ca-certificates iproute2 curl
+            apt-get install -y wget unzip openvpn ca-certificates iproute2 curl iputils-ping traceroute dnsutils
+            
+            # Check initial network
+            echo 'Initial Network State:'
+            echo 'IP address:'
+            curl -s https://api.ipify.org || echo 'Failed to get initial IP'
+            echo 'DNS resolution:'
+            dig +short google.com
+            echo 'Traceroute to Google DNS:'
+            traceroute -n -m 5 8.8.8.8 || echo 'Initial traceroute failed'
             
             echo 'Setting up OpenVPN connection to PIA...'
             mkdir -p /tmp/pia
@@ -46,7 +56,9 @@ jobs:
             echo 'Starting OpenVPN connection...'
             SERVER_FILE=/tmp/pia/us_east.ovpn
             sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
-            openvpn --config \$SERVER_FILE --daemon --log /workspace/openvpn.log
+            # Enable more verbose logging
+            sed -i 's/verb 1/verb 4/' \$SERVER_FILE
+            openvpn --config \$SERVER_FILE --daemon --log /tmp/openvpn.log
             
             echo 'Waiting for VPN interface to establish...'
             for i in \$(seq 1 12); do
@@ -57,35 +69,76 @@ jobs:
                 echo \"VPN routing table:\"
                 ip route
                 
-                # Test connectivity through VPN
-                echo \"Testing VPN connectivity...\"
-                curl -s https://api.ipify.org || echo \"IP service timeout as expected through VPN\"
+                # Wait a bit for routes to establish
+                sleep 5
                 
-                echo \"VPN Connection Test: SUCCESS\" > /workspace/vpn_test_result.log
-                exit 0
+                # Comprehensive network testing through VPN
+                echo \"Testing DNS through VPN:\"
+                dig +short google.com || echo \"DNS resolution failed through VPN\"
+                
+                echo \"Testing ping through VPN:\"
+                ping -c 3 8.8.8.8 || echo \"Ping failed through VPN\"
+                
+                echo \"Testing traceroute through VPN:\"
+                traceroute -n -m 10 8.8.8.8 || echo \"Traceroute failed through VPN\"
+                
+                echo \"Testing multiple IP services through VPN:\"
+                echo \"ipify.org:\"
+                curl -s https://api.ipify.org || echo \"ipify.org timed out\"
+                
+                echo \"ifconfig.me:\"
+                curl -s https://ifconfig.me || echo \"ifconfig.me timed out\"
+                
+                echo \"icanhazip.com:\"
+                curl -s https://icanhazip.com || echo \"icanhazip.com timed out\"
+                
+                echo \"ip.me:\"
+                curl -s https://ip.me || echo \"ip.me timed out\"
+                
+                echo \"VPN logs:\"
+                cat /tmp/openvpn.log > /dev/stdout
+                cp /tmp/openvpn.log /tmp/logs/openvpn.log
+                
+                echo \"Network diagnostics complete\"
+                # Create logs directory and save results
+                mkdir -p /tmp/logs
+                ip a > /tmp/logs/interfaces.log
+                ip route > /tmp/logs/routes.log
+                break
               fi
               
               if [ \$i -eq 12 ]; then
                 echo \"VPN Connection Failed\"
-                cat /workspace/openvpn.log
-                echo \"VPN Connection Test: FAILED\" > /workspace/vpn_test_result.log
+                cat /tmp/openvpn.log > /dev/stdout
+                
+                # Create logs directory and save failure logs
+                mkdir -p /tmp/logs
+                cat /tmp/openvpn.log > /tmp/logs/openvpn.log
                 exit 1
               fi
               
-              if [ \$((i % 3)) -eq 0 ]; then
+              # Show more logs for debugging
+              if [ \$((i % 2)) -eq 0 ]; then
                 echo \"Current OpenVPN log:\"
-                tail -n 20 /workspace/openvpn.log
+                cat /tmp/openvpn.log | tail -30
               fi
               
               sleep 5
             done
+            
+            # Make logs accessible to the host user
+            chmod -R 777 /tmp/logs
           "
+          
+          # Copy logs from Docker
+          docker cp $(docker ps -lq):/tmp/logs ./logs
+          chmod -R 755 ./logs
 
-      - name: Upload VPN Test Results
+      - name: Upload Diagnostic Information
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vpn-test-results
+          name: vpn-diagnostics
           path: |
-            *.log
+            logs/
           retention-days: 7
