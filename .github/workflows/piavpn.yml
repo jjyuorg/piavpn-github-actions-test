@@ -263,7 +263,7 @@ jobs:
                 });
                 console.log(`Video playing status at ${t}s: ${isPlaying}`);
 
-                // If not playing, reconnect + retry (up to 3 attempts)
+                // If not playing, reconnect + unlimited retry
                 if (!isPlaying) {
                   console.log('Video is NOT playing. Reconnecting VPN and retrying...');
                   await browser.close();
@@ -271,11 +271,8 @@ jobs:
                   if (!reconnected) {
                     throw new Error('VPN reconnect failed. Aborting.');
                   }
-                  if (attempt < 3) {
-                    return visitRumble(videoUrl, attempt + 1);
-                  } else {
-                    throw new Error('Max attempts reached. Aborting after multiple VPN reconnects.');
-                  }
+                  // No max attempt limit – just keep recursing
+                  return visitRumble(videoUrl, attempt + 1);
                 }
               }
 
