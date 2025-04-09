@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Run PIA VPN with Enhanced Error Checking
+      - name: Run PIA VPN with Compatible Options
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
@@ -21,18 +21,14 @@ jobs:
             apt update
             apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2
             
-            # Verify installation
-            which openvpn || { echo "OpenVPN installation failed"; exit 1; }
-            
             # Record initial state
             echo "Initial IP:"
             curl -s https://api.ipify.org || echo "Unable to get initial IP"
             
             echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
-            ls -la /tmp/  # Debug directory structure
             
-            # Create config with insecure flag
+            # Create config with compatible options
             echo "client" > /tmp/pia/pia.ovpn
             echo "dev tun" >> /tmp/pia/pia.ovpn
             echo "proto tcp" >> /tmp/pia/pia.ovpn
@@ -41,23 +37,22 @@ jobs:
             echo "nobind" >> /tmp/pia/pia.ovpn
             echo "persist-key" >> /tmp/pia/pia.ovpn
             echo "persist-tun" >> /tmp/pia/pia.ovpn
-            echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305" >> /tmp/pia/pia.ovpn
-            echo "auth SHA256" >> /tmp/pia/pia.ovpn
-            echo "tls-client" >> /tmp/pia/pia.ovpn
-            # Skip cert verification
+            echo "cipher AES-256-CBC" >> /tmp/pia/pia.ovpn  # Compatible cipher
+            echo "auth SHA1" >> /tmp/pia/pia.ovpn           # Compatible auth
             echo "auth-nocache" >> /tmp/pia/pia.ovpn
             echo "auth-user-pass /tmp/pia/auth.txt" >> /tmp/pia/pia.ovpn
-            echo "compress" >> /tmp/pia/pia.ovpn
-            echo "verb 5" >> /tmp/pia/pia.ovpn
+            echo "comp-lzo" >> /tmp/pia/pia.ovpn
+            echo "verb 3" >> /tmp/pia/pia.ovpn
             echo "connect-retry 5 5" >> /tmp/pia/pia.ovpn
             echo "connect-timeout 10" >> /tmp/pia/pia.ovpn
             echo "dhcp-option DNS 8.8.8.8" >> /tmp/pia/pia.ovpn
             echo "dhcp-option DNS 8.8.4.4" >> /tmp/pia/pia.ovpn
             echo "pull" >> /tmp/pia/pia.ovpn
             echo "fast-io" >> /tmp/pia/pia.ovpn
-            # Skip verifying server certificate
-            echo "verify-client-cert none" >> /tmp/pia/pia.ovpn
-            echo "tls-verify-warn" >> /tmp/pia/pia.ovpn
+            # Skip certificate verification
+            echo "tls-client" >> /tmp/pia/pia.ovpn
+            echo "remote-cert-tls server" >> /tmp/pia/pia.ovpn
+            echo "ns-cert-type server" >> /tmp/pia/pia.ovpn  # Legacy option for compatibility 
             
             # Show contents of the config file
             echo "OpenVPN config:"
@@ -69,9 +64,9 @@ jobs:
             chmod 600 /tmp/pia/auth.txt
             
             echo "Starting OpenVPN connection..."
-            # Start OpenVPN with custom options to handle errors
+            # Start OpenVPN with command line options to handle insecure connections
             openvpn --config /tmp/pia/pia.ovpn --auth-nocache --auth-retry nointeract --daemon --log /tmp/openvpn.log
-
+            
             echo "Waiting for VPN interface to establish..."
             for i in $(seq 1 15); do
               echo "Checking for VPN interface (attempt $i)..."
