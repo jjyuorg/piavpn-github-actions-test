@@ -37,15 +37,15 @@ jobs:
           echo "Downloading PIA client..."
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           chmod +x pia.run
-          # Create a non-root user 'piauser' if it doesn't already exist.
+          # Create non-root user 'piauser' if not present
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
-          # Run the installer as piauser.
-          # Using $(pwd)/pia.run to reference the downloaded installer.
+          # Configure passwordless sudo for piauser to avoid password prompts
+          echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
+          echo "Installing PIA client as piauser..."
           su - piauser -c "$(pwd)/pia.run --accept --nox11"
-          # The installer (when run as non-root) installs piactl to /home/piauser/pia/bin.
-          # Copy piactl to /usr/local/bin so that subsequent steps (running as root) can use it.
+          # Copy piactl so it is available in the PATH for later steps
           sudo cp /home/piauser/pia/bin/piactl /usr/local/bin/ || { echo "piactl not found after installation. Exiting."; exit 1; }
           echo "piactl installed at $(which piactl)"
           echo "Logging into PIA..."
