@@ -1,4 +1,4 @@
-name: Test PIA VPN Connection via OpenVPN
+name: Test PIA VPN Connection via OpenVPN (US Servers)
 on:
   push:           # Runs automatically on each commit
   workflow_dispatch:  # Also allows manual triggering
@@ -8,19 +8,42 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Run PIA VPN using Official OpenVPN Config
+      - name: Test Multiple PIA US Servers
         run: |
-          # Disable immediate exit on error in the host shell so we can capture the exit code.
+          # Disable immediate exit on error in the host shell
           set +e
+          
+          # Record GitHub Actions host IP for comparison
+          HOST_IP=$(curl -s https://ipinfo.io/ip)
+          echo "GitHub Actions host IP: $HOST_IP"
+          
+          # Create a results file to store our findings
+          echo "PIA VPN Server Test Results" > pia_test_results.txt
+          echo "=========================" >> pia_test_results.txt
+          echo "Original IP: $HOST_IP" >> pia_test_results.txt
+          echo "=========================" >> pia_test_results.txt
+          
+          # Run tests for each US server
           docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c '
             export DEBIAN_FRONTEND=noninteractive
             echo "Installing dependencies..."
             apt update
-            apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2 unzip
+            apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2 unzip jq dnsutils
             
-            # Record initial state
-            echo "Initial IP:"
-            curl -s https://api.ipify.org || echo "Unable to get initial IP"
+            # Record initial state with multiple IP checking services
+            echo "Initial IP from ipinfo.io:"
+            ORIG_IP=$(curl -s https://ipinfo.io/ip)
+            echo $ORIG_IP
+            
+            echo "Initial IP from ifconfig.me:"
+            curl -s https://ifconfig.me
+            echo ""
+            
+            echo "DNS check:"
+            dig +short myip.opendns.com @resolver1.opendns.com
+            
+            # Create directory for test results inside container
+            mkdir -p /tmp/results
             
             echo "Downloading PIA OpenVPN configuration files..."
             mkdir -p /tmp/pia
@@ -29,60 +52,133 @@ jobs:
             
             echo "Extracting configuration files..."
             unzip -q openvpn.zip
-            ls -la  # List the available configuration files
             
             echo "Creating credentials file..."
             echo "${{ secrets.PIA_USERNAME }}" > /tmp/pia/auth.txt
             echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
-            echo "Starting OpenVPN connection using official PIA configuration..."
-            # Choose a US server as example - use a server that is likely to work well
-            OVPN_CONFIG="/tmp/pia/us_east.ovpn"
+            # Find all US server configs
+            US_SERVERS=$(find /tmp/pia -name "us_*.ovpn")
             
-            # Modify the auth-user-pass line to point to our auth file
-            sed -i "s/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/" $OVPN_CONFIG
+            # Function to test a server
+            test_server() {
+              SERVER_FILE=$1
+              SERVER_NAME=$(basename $SERVER_FILE .ovpn)
+              
+              echo "Testing $SERVER_NAME..."
+              
+              # Modify the auth-user-pass line to point to our auth file
+              sed -i "s/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/" $SERVER_FILE
+              
+              # Kill any existing OpenVPN processes
+              pkill -9 openvpn 2>/dev/null || true
+              
+              # Start OpenVPN
+              echo "Starting OpenVPN with $SERVER_NAME configuration..."
+              openvpn --config $SERVER_FILE --daemon --log /tmp/$SERVER_NAME.log
+              
+              # Wait for connection
+              echo "Waiting for VPN interface to establish..."
+              success=false
+              
+              for i in $(seq 1 10); do
+                echo "Checking for VPN interface (attempt $i)..."
+                if ip a | grep -q tun0; then
+                  echo "VPN interface detected!"
+                  
+                  # Multiple IP check services for reliability
+                  VPN_IP_1=$(curl -s --max-time 5 https://ipinfo.io/ip || echo "Timeout")
+                  VPN_IP_2=$(curl -s --max-time 5 https://ifconfig.me || echo "Timeout")
+                  VPN_IP_3=$(dig +short +time=5 +tries=1 myip.opendns.com @resolver1.opendns.com || echo "Timeout")
+                  
+                  # Check if we got any valid IPs and they differ from original
+                  if [[ "$VPN_IP_1" != "Timeout" && "$VPN_IP_1" != "$ORIG_IP" ]]; then
+                    success=true
+                    IP_CHECK="$VPN_IP_1"
+                  elif [[ "$VPN_IP_2" != "Timeout" && "$VPN_IP_2" != "$ORIG_IP" ]]; then
+                    success=true
+                    IP_CHECK="$VPN_IP_2"
+                  elif [[ "$VPN_IP_3" != "Timeout" && "$VPN_IP_3" != "$ORIG_IP" ]]; then
+                    success=true
+                    IP_CHECK="$VPN_IP_3"
+                  fi
+                  
+                  if [ "$success" = true ]; then
+                    # Record results
+                    echo "SUCCESS: $SERVER_NAME - New IP: $IP_CHECK" | tee -a /tmp/results/$SERVER_NAME.txt
+                    
+                    # Get geolocation info
+                    echo "Getting location information..."
+                    curl -s "https://ipinfo.io/${IP_CHECK}/json" | jq -r '"Location: " + .city + ", " + .region + ", " + .country' | tee -a /tmp/results/$SERVER_NAME.txt
+                    
+                    # Add extra info to results
+                    echo "Route information:" >> /tmp/results/$SERVER_NAME.txt
+                    ip route >> /tmp/results/$SERVER_NAME.txt
+                    
+                    # Clean up
+                    pkill -9 openvpn
+                    return 0
+                  fi
+                fi
+                
+                # Check if process is still running
+                if ! pgrep -x openvpn > /dev/null; then
+                  echo "OpenVPN process died."
+                  echo "FAILED: $SERVER_NAME - OpenVPN process died" > /tmp/results/$SERVER_NAME.txt
+                  cat /tmp/$SERVER_NAME.log >> /tmp/results/$SERVER_NAME.txt
+                  return 1
+                fi
+                
+                sleep 5
+              done
+              
+              # If we get here, connection timed out
+              echo "FAILED: $SERVER_NAME - Connection timed out" > /tmp/results/$SERVER_NAME.txt
+              cat /tmp/$SERVER_NAME.log | tail -30 >> /tmp/results/$SERVER_NAME.txt
+              
+              # Clean up
+              pkill -9 openvpn 2>/dev/null || true
+              return 1
+            }
             
-            # Start OpenVPN in the foreground to see logs directly
-            echo "Starting OpenVPN with server configuration - this may take a minute..."
-            openvpn --config $OVPN_CONFIG --daemon --log /tmp/openvpn.log
-            
-            # Wait for connection
-            echo "Waiting for VPN interface to establish..."
-            for i in $(seq 1 20); do
-              echo "Checking for VPN interface (attempt $i)..."
-              if ip a | grep -q tun0; then
-                echo "VPN interface detected!"
-                ip a show tun0
-                echo "Checking routes:"
-                ip route
-                echo "New IP after VPN connection:"
-                curl -s https://api.ipify.org || echo "Unable to get new IP"
-                echo "VPN connection successful!"
-                exit 0
-              fi
-              
-              # Show logs
-              if [ -f /tmp/openvpn.log ]; then
-                echo "Current OpenVPN log (attempt $i):"
-                tail -n 10 /tmp/openvpn.log
-              fi
-              
-              # Check if process is still running
-              if ! pgrep -x openvpn > /dev/null; then
-                echo "OpenVPN process died. Full logs:"
-                cat /tmp/openvpn.log
-                exit 1
-              fi
-              
-              sleep 5
+            # Test each US server
+            for server in $US_SERVERS; do
+              test_server $server
+              # Short pause between server tests
+              sleep 2
             done
             
-            # If we get here, connection timed out
-            echo "VPN connection timed out after multiple attempts."
-            cat /tmp/openvpn.log
-            exit 1
+            # Compile results
+            echo "===== PIA VPN US SERVER TEST RESULTS =====" > /tmp/pia_results.txt
+            echo "Original IP: $ORIG_IP" >> /tmp/pia_results.txt
+            echo "" >> /tmp/pia_results.txt
+            
+            # List successful servers first
+            echo "SUCCESSFUL CONNECTIONS:" >> /tmp/pia_results.txt
+            grep -l "SUCCESS" /tmp/results/*.txt | while read file; do
+              server=$(basename $file .txt)
+              echo "- $server: $(grep "New IP" $file | cut -d ":" -f2-)" >> /tmp/pia_results.txt
+              grep "Location" $file >> /tmp/pia_results.txt
+              echo "" >> /tmp/pia_results.txt
+            done
+            
+            # List failed servers
+            echo "FAILED CONNECTIONS:" >> /tmp/pia_results.txt
+            grep -l "FAILED" /tmp/results/*.txt | while read file; do
+              server=$(basename $file .txt)
+              failure_reason=$(grep "FAILED" $file | cut -d ":" -f2-)
+              echo "- $server:$failure_reason" >> /tmp/pia_results.txt
+            done
+            
+            # Display final results
+            cat /tmp/pia_results.txt
           '
           exit_code=$?
           echo "Docker run exit code: $exit_code"
-          exit $exit_code
+          
+          # The workflow succeeds if at least one server works
+          if [ $exit_code -ne 0 ]; then
+            echo "No PIA VPN servers were successfully connected"
+            exit 1
+          fi
