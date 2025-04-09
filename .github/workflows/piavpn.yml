@@ -1,4 +1,4 @@
-name: Test PIA VPN Connection (TCP 443 Insecure)
+name: Test PIA VPN Connection via OpenVPN
 on:
   push:           # Runs automatically on each commit
   workflow_dispatch:  # Also allows manual triggering
@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Run PIA VPN with CA Certificate
+      - name: Run PIA VPN using Official OpenVPN Config
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
@@ -16,59 +16,41 @@ jobs:
             export DEBIAN_FRONTEND=noninteractive
             echo "Installing dependencies..."
             apt update
-            apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2
+            apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2 unzip
             
             # Record initial state
             echo "Initial IP:"
             curl -s https://api.ipify.org || echo "Unable to get initial IP"
             
-            echo "Setting up OpenVPN configuration..."
+            echo "Downloading PIA OpenVPN configuration files..."
             mkdir -p /tmp/pia
+            cd /tmp/pia
+            wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
             
-            # Download the CA certificate
-            echo "Downloading PIA CA certificate..."
-            wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O /tmp/pia/ca.rsa.4096.crt
-            
-            # Create config with CA certificate
-            echo "client" > /tmp/pia/pia.ovpn
-            echo "dev tun" >> /tmp/pia/pia.ovpn
-            echo "proto tcp" >> /tmp/pia/pia.ovpn
-            echo "remote 84.17.57.98 443" >> /tmp/pia/pia.ovpn
-            echo "resolv-retry infinite" >> /tmp/pia/pia.ovpn
-            echo "nobind" >> /tmp/pia/pia.ovpn
-            echo "persist-key" >> /tmp/pia/pia.ovpn
-            echo "persist-tun" >> /tmp/pia/pia.ovpn
-            echo "cipher AES-256-CBC" >> /tmp/pia/pia.ovpn
-            echo "auth SHA1" >> /tmp/pia/pia.ovpn
-            echo "auth-nocache" >> /tmp/pia/pia.ovpn
-            echo "auth-user-pass /tmp/pia/auth.txt" >> /tmp/pia/pia.ovpn
-            echo "comp-lzo" >> /tmp/pia/pia.ovpn
-            echo "verb 3" >> /tmp/pia/pia.ovpn
-            echo "connect-retry 5 5" >> /tmp/pia/pia.ovpn
-            echo "connect-timeout 10" >> /tmp/pia/pia.ovpn
-            echo "dhcp-option DNS 8.8.8.8" >> /tmp/pia/pia.ovpn
-            echo "dhcp-option DNS 8.8.4.4" >> /tmp/pia/pia.ovpn
-            echo "pull" >> /tmp/pia/pia.ovpn
-            echo "fast-io" >> /tmp/pia/pia.ovpn
-            echo "tls-client" >> /tmp/pia/pia.ovpn
-            echo "remote-cert-tls server" >> /tmp/pia/pia.ovpn
-            echo "ca /tmp/pia/ca.rsa.4096.crt" >> /tmp/pia/pia.ovpn
-            
-            # Show contents of the config file
-            echo "OpenVPN config:"
-            cat /tmp/pia/pia.ovpn
+            echo "Extracting configuration files..."
+            unzip -q openvpn.zip
+            ls -la  # List the available configuration files
             
             echo "Creating credentials file..."
-            echo "${{ secrets.PIA_USERNAME }}" > /tmp/pia/auth.txt
-            echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
+            cat > /tmp/pia/auth.txt << EOF
+            ${{ secrets.PIA_USERNAME }}
+            ${{ secrets.PIA_PASSWORD }}
+            EOF
             chmod 600 /tmp/pia/auth.txt
             
-            echo "Starting OpenVPN connection..."
-            openvpn --config /tmp/pia/pia.ovpn --auth-nocache --auth-retry nointeract --daemon --log /tmp/openvpn.log
+            echo "Starting OpenVPN connection using official PIA configuration..."
+            # Choose a US server as example
+            OVPN_CONFIG="/tmp/pia/us_california.ovpn"
+            
+            # Modify the auth-user-pass line to point to our auth file
+            sed -i "s/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/" $OVPN_CONFIG
+            
+            # Start OpenVPN
+            openvpn --config $OVPN_CONFIG --daemon --log /tmp/openvpn.log
             
             echo "Waiting for VPN interface to establish..."
             # Sleep first to give OpenVPN time to start
-            sleep 5
+            sleep 10
             
             # Check if OpenVPN is still running
             if ! pgrep -x openvpn > /dev/null; then
