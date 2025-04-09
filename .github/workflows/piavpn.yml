@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: jrei/systemd-ubuntu:20.04
-      # These options help ensure that systemd runs as PID 1:
+      # Enable systemd by running privileged, mounting /run and /run/lock as tmpfs, and binding /sys/fs/cgroup.
       options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro
     steps:
       - name: Checkout Repository
@@ -37,7 +37,11 @@ jobs:
           apt install -y curl wget sudo iproute2 apt-transport-https gnupg ca-certificates
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
           apt install -y nodejs
-          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxshmfence1 libxss1 libasound2-plugins libasound2 libpulse0 libxkbcommon0 xdg-utils lsb-release
+          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+            libcups2 libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 \
+            libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 \
+            libxshmfence1 libxss1 libasound2-plugins libasound2 libpulse0 libxkbcommon0 \
+            xdg-utils lsb-release
 
       - name: Install and Connect PIA
         env:
@@ -51,7 +55,7 @@ jobs:
           echo "Starting system dbus daemon..."
           sudo dbus-daemon --system --fork || true
 
-          # Create a non-root user 'piauser' if needed.
+          # Create non-root user 'piauser' if needed.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
@@ -63,7 +67,7 @@ jobs:
           echo "Listing extracted files for debugging:"
           ls -R /home/piauser
 
-          # Search for the piactl binary (case-insensitive).
+          # Search for the piactl binary (search both in /home/piauser and /opt/piavpn).
           PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
             echo "piactl not found after installation. Exiting."
@@ -78,13 +82,45 @@ jobs:
           fi
           echo "piactl installed at $(which piactl)"
 
-          echo "Logging into PIA (verbose, timeout 90 sec)..."
+          # Create a temporary credentials file.
           echo -e "${PIA_USERNAME}\n${PIA_PASSWORD}" > pia_credentials.txt
-          sudo piactl login --timeout 90 --debug pia_credentials.txt 2>&1 | tee piactl_login.log
+          
+          # Retry login up to 3 times with 150 sec timeout.
+          MAX_RETRIES=3
+          retry=0
+          login_success=0
+          while [ $retry -lt $MAX_RETRIES ]; do
+            echo "Attempting to log in to PIA (try $((retry+1))/$MAX_RETRIES)..."
+            if sudo piactl login --timeout 150 --debug pia_credentials.txt 2>&1 | tee piactl_login.log; then
+              login_success=1
+              break
+            fi
+            retry=$((retry+1))
+            echo "Login attempt $retry failed. Retrying in 10 seconds..."
+            sleep 10
+          done
           rm pia_credentials.txt
+          if [ $login_success -ne 1 ]; then
+            echo "PIA login failed after $MAX_RETRIES attempts."
+            exit 1
+          fi
 
-          echo "Connecting to PIA (verbose, timeout 90 sec)..."
-          sudo piactl connect --timeout 90 --debug 2>&1 | tee piactl_connect.log
+          echo "Attempting to connect to PIA (timeout 150 sec, verbose)..."
+          retry=0
+          connect_success=0
+          while [ $retry -lt $MAX_RETRIES ]; do
+            if sudo piactl connect --timeout 150 --debug 2>&1 | tee piactl_connect.log; then
+              connect_success=1
+              break
+            fi
+            retry=$((retry+1))
+            echo "Connect attempt $retry failed. Retrying in 10 seconds..."
+            sleep 10
+          done
+          if [ $connect_success -ne 1 ]; then
+            echo "PIA connect failed after $MAX_RETRIES attempts."
+            exit 1
+          fi
           sleep 10
 
       - name: Install Puppeteer Dependencies
@@ -100,22 +136,22 @@ jobs:
           const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           const fs = require('fs');
           const { execSync } = require('child_process');
-          
+
           puppeteer.use(StealthPlugin());
-          
+
           function sleep(ms) {
               return new Promise(resolve => setTimeout(resolve, ms));
           }
-          
+
           async function safeScreenshot(page, path) {
               try {
                   await page.screenshot({ path });
-                  console.log(`Screenshot taken: ${path}`);
+                  console.log(\`Screenshot taken: \${path}\`);
               } catch (err) {
-                  console.error(`Failed to take screenshot ${path}: ${err.message}`);
+                  console.error(\`Failed to take screenshot \${path}: \${err.message}\`);
               }
           }
-          
+
           async function reconnectVPN() {
               console.log("Reconnecting to a different VPN server...");
               try {
@@ -131,7 +167,7 @@ jobs:
                   return reconnectVPN();
               }
           }
-          
+
           async function visitRumble(videoUrl) {
               let browser = await puppeteer.launch({
                   headless: "new",
@@ -139,16 +175,16 @@ jobs:
                   executablePath: require('puppeteer').executablePath(),
                   args: ['--no-sandbox', '--disable-setuid-sandbox']
               });
-          
+
               let page = await browser.newPage();
               await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
               await page.setCacheEnabled(false);
-          
+
               console.log("Navigating to Rumble video...");
               await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 120000 });
               await sleep(3000);
-              await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
-          
+              await safeScreenshot(page, \`./screenshots/rumble_landing_\${Date.now()}.png\`);
+
               const playButtonSelectors = [
                   '.bigPlayUIInner.ctp',
                   'button[aria-label="Play"]',
@@ -156,15 +192,15 @@ jobs:
                   '.icon-play',
                   'div[class*=play]'
               ];
-          
+
               let playButton = null;
               for (const selector of playButtonSelectors) {
                   playButton = await page.$(selector);
                   if (playButton) {
-                      console.log(`Play button found using selector: ${selector}`);
+                      console.log(\`Play button found using selector: \${selector}\`);
                       await playButton.click();
                       await sleep(3000);
-                      await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
+                      await safeScreenshot(page, \`./screenshots/rumble_play_clicked_\${Date.now()}.png\`);
                       break;
                   }
               }
@@ -173,7 +209,7 @@ jobs:
               }
               for (let t = 5; t <= 30; t += 5) {
                   await sleep(5000);
-                  await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
+                  await safeScreenshot(page, \`./screenshots/rumble_watch_\${t}s_\${Date.now()}.png\`);
                   const isPlaying = await page.evaluate(() => {
                       const video = document.querySelector("video");
                       return video && !video.paused && !video.ended && video.readyState > 2;
@@ -190,17 +226,17 @@ jobs:
                   }
               }
               const finalHtml = await page.content();
-              const htmlFile = `./screenshots/final_rumble_page_${Date.now()}.html`;
+              const htmlFile = \`./screenshots/final_rumble_page_\${Date.now()}.html\`;
               fs.writeFileSync(htmlFile, finalHtml);
-              console.log(`Final HTML page saved: ${htmlFile}`);
+              console.log(\`Final HTML page saved: \${htmlFile}\`);
               await browser.close();
           }
-          
+
           async function run() {
               const videoUrl = process.argv[2] || "https://rumble.com/v6r0vz6-automate.html";
               await visitRumble(videoUrl);
           }
-          
+
           run().catch(error => {
               console.error("Script failed:", error.message);
           });
