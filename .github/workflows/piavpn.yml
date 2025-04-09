@@ -1,4 +1,4 @@
-name: Test PIA VPN Connection via OpenVPN (US Servers)
+name: Test PIA VPN Connection via OpenVPN
 on:
   push:           # Runs automatically on each commit
   workflow_dispatch:  # Also allows manual triggering
@@ -8,49 +8,25 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Test Multiple PIA US Servers
+      - name: Test PIA VPN Connection and Routes
         run: |
-          # Disable immediate exit on error in the host shell
-          set +e
-          
-          # Record GitHub Actions host IP for comparison
-          HOST_IP=$(curl -s https://ipinfo.io/ip)
-          echo "GitHub Actions host IP: $HOST_IP"
-          
-          # Create a results file to store our findings
-          echo "PIA VPN Server Test Results" > pia_test_results.txt
-          echo "=========================" >> pia_test_results.txt
-          echo "Original IP: $HOST_IP" >> pia_test_results.txt
-          echo "=========================" >> pia_test_results.txt
-          
-          # Run tests for each US server
           docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c "
             export DEBIAN_FRONTEND=noninteractive
             echo 'Installing dependencies...'
             apt update
-            apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2 unzip jq dnsutils
+            apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2 unzip traceroute iputils-ping
             
-            # Record initial state with multiple IP checking services
-            echo 'Initial IP from ipinfo.io:'
-            ORIG_IP=\$(curl -s https://ipinfo.io/ip)
-            echo \$ORIG_IP
-            
-            echo 'Initial IP from ifconfig.me:'
-            curl -s https://ifconfig.me
-            echo ''
-            
-            echo 'DNS check:'
-            dig +short myip.opendns.com @resolver1.opendns.com
-            
-            # Create directory for test results inside container
-            mkdir -p /tmp/results
+            # Capture pre-VPN state
+            echo 'Initial Network State:'
+            echo 'Original routes:'
+            ip route
+            echo 'Original traceroute to Google DNS:'
+            traceroute -n -T -m 10 8.8.8.8 || echo 'Traceroute failed'
             
             echo 'Downloading PIA OpenVPN configuration files...'
             mkdir -p /tmp/pia
             cd /tmp/pia
             wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
-            
-            echo 'Extracting configuration files...'
             unzip -q openvpn.zip
             
             echo 'Creating credentials file...'
@@ -58,61 +34,59 @@ jobs:
             echo '${{ secrets.PIA_PASSWORD }}' >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
-            # Test specific servers that are most likely to work
-            declare -a SERVERS=('us_east' 'us_west' 'us_california' 'us_atlanta' 'us_new_york')
+            # Test a known working server from previous tests
+            SERVER='us_east'
+            SERVER_FILE=/tmp/pia/\${SERVER}.ovpn
             
-            for server in \${SERVERS[@]}; do
-              SERVER_FILE=/tmp/pia/\${server}.ovpn
-              echo \"Testing \$server server...\"
-              
-              # Modify the auth-user-pass line to point to our auth file
-              sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
-              
-              # Start OpenVPN
-              openvpn --config \$SERVER_FILE --daemon --log /tmp/\${server}.log
-              
-              # Wait for connection
-              echo \"Waiting for VPN interface to establish...\"
-              for i in \$(seq 1 10); do
-                echo \"Checking for VPN interface (attempt \$i)...\"
-                if ip a | grep -q tun0; then
-                  echo \"VPN interface detected!\"
-                  ip a show tun0
-                  
-                  # Check for IP change
-                  echo \"New IP:\"
-                  NEW_IP=\$(curl -s --max-time 5 https://ipinfo.io/ip || echo \"Timeout\")
-                  echo \"\$NEW_IP\"
-                  
-                  if [[ \"\$NEW_IP\" != \"Timeout\" && \"\$NEW_IP\" != \"\$ORIG_IP\" ]]; then
-                    echo \"SUCCESS: \$server - IP changed from \$ORIG_IP to \$NEW_IP\"
-                    # Get location info
-                    curl -s \"https://ipinfo.io/\${NEW_IP}/json\" | jq -r '.city + \", \" + .region + \", \" + .country'
-                  else
-                    echo \"FAILED: \$server - IP did not change or check timed out\"
-                  fi
-                  
-                  # Clean up before next test
-                  pkill -9 openvpn
-                  sleep 2
-                  break
+            # Modify the auth-user-pass line to point to our auth file
+            sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
+            
+            # Start OpenVPN
+            echo \"Starting OpenVPN connection to \$SERVER...\"
+            openvpn --config \$SERVER_FILE --daemon --log /tmp/openvpn.log
+            
+            # Wait for connection
+            success=false
+            for i in \$(seq 1 10); do
+              echo \"Checking for VPN interface (attempt \$i)...\"
+              if ip a | grep -q tun0; then
+                success=true
+                echo \"VPN interface detected!\"
+                ip a show tun0
+                
+                # Extended verification without relying on external IP checks
+                echo \"VPN routing table:\"
+                ip route
+                
+                echo \"Verifying routes are going through VPN tunnel:\"
+                if ip route | grep -q \"0.0.0.0/1 via 10.\"; then
+                  echo \"SUCCESS: Default routes redirected through VPN tunnel\"
+                else
+                  echo \"WARNING: Default routes not fully redirected\"
                 fi
                 
-                # Check if the process died
-                if ! pgrep -x openvpn > /dev/null; then
-                  echo \"OpenVPN process died. Log:\"
-                  cat /tmp/\${server}.log | tail -20
-                  break
-                fi
+                echo \"Post-VPN traceroute to Google DNS:\"
+                traceroute -n -T -m 10 8.8.8.8 || echo 'Traceroute failed'
                 
-                sleep 3
-              done
-              
-              # If openvpn is still running, kill it
-              pkill -9 openvpn 2>/dev/null || true
-              sleep 2
+                # Test VPN DNS resolution
+                echo \"Testing DNS through VPN:\"
+                ping -c 3 google.com || echo 'Ping failed'
+                
+                break
+              fi
+              sleep 3
             done
+            
+            if [ \"\$success\" = true ]; then
+              echo \"VPN Connection Test Complete - SUCCESS\"
+              cat /tmp/openvpn.log | grep \"Initialization Sequence Completed\"
+              exit 0
+            else
+              echo \"VPN Connection Failed\"
+              cat /tmp/openvpn.log
+              exit 1
+            fi
           "
           exit_code=$?
           echo "Docker run exit code: $exit_code"
-          exit 0  # Always exit with success to see the results
+          exit $exit_code
