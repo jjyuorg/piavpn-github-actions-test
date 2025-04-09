@@ -8,15 +8,21 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Run PIA VPN with Insecure Flag
+      - name: Run PIA VPN with Enhanced Error Checking
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
           docker run --rm --privileged --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c '
-            set -e
+            # Enable better error handling
+            set -ex
+            
             export DEBIAN_FRONTEND=noninteractive
             echo "Installing dependencies..."
-            apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2
+            apt update
+            apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2
+            
+            # Verify installation
+            which openvpn || { echo "OpenVPN installation failed"; exit 1; }
             
             # Record initial state
             echo "Initial IP:"
@@ -24,12 +30,12 @@ jobs:
             
             echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
+            ls -la /tmp/  # Debug directory structure
             
             # Create config with insecure flag
             echo "client" > /tmp/pia/pia.ovpn
             echo "dev tun" >> /tmp/pia/pia.ovpn
             echo "proto tcp" >> /tmp/pia/pia.ovpn
-            # Try the other working server
             echo "remote 84.17.57.98 443" >> /tmp/pia/pia.ovpn
             echo "resolv-retry infinite" >> /tmp/pia/pia.ovpn
             echo "nobind" >> /tmp/pia/pia.ovpn
@@ -39,7 +45,7 @@ jobs:
             echo "auth SHA256" >> /tmp/pia/pia.ovpn
             echo "tls-client" >> /tmp/pia/pia.ovpn
             # Skip cert verification
-            echo "verify-x509-name none" >> /tmp/pia/pia.ovpn
+            echo "auth-nocache" >> /tmp/pia/pia.ovpn
             echo "auth-user-pass /tmp/pia/auth.txt" >> /tmp/pia/pia.ovpn
             echo "compress" >> /tmp/pia/pia.ovpn
             echo "verb 5" >> /tmp/pia/pia.ovpn
@@ -49,46 +55,54 @@ jobs:
             echo "dhcp-option DNS 8.8.4.4" >> /tmp/pia/pia.ovpn
             echo "pull" >> /tmp/pia/pia.ovpn
             echo "fast-io" >> /tmp/pia/pia.ovpn
-            # Add insecure flag to skip certificate verification
-            echo "insecure-port 443" >> /tmp/pia/pia.ovpn
+            # Skip verifying server certificate
+            echo "verify-client-cert none" >> /tmp/pia/pia.ovpn
+            echo "tls-verify-warn" >> /tmp/pia/pia.ovpn
             
-            # Download CA certificate but we won\'t enforce verification
-            wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O /tmp/pia/ca.rsa.4096.crt
+            # Show contents of the config file
+            echo "OpenVPN config:"
+            cat /tmp/pia/pia.ovpn
             
             echo "Creating credentials file..."
             echo "${{ secrets.PIA_USERNAME }}" > /tmp/pia/auth.txt
             echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
-            echo "Starting OpenVPN connection with insecure flag..."
-            openvpn --config /tmp/pia/pia.ovpn --daemon --log /tmp/openvpn.log --auth-nocache --auth-retry nointeract
-            
+            echo "Starting OpenVPN connection..."
+            # Start OpenVPN with custom options to handle errors
+            openvpn --config /tmp/pia/pia.ovpn --auth-nocache --auth-retry nointeract --daemon --log /tmp/openvpn.log
+
             echo "Waiting for VPN interface to establish..."
-            for i in $(seq 1 30); do
+            for i in $(seq 1 15); do
               echo "Checking for VPN interface (attempt $i)..."
               if ip a | grep -q tun0; then
                 echo "VPN interface detected!"
                 ip a show tun0
-                # Wait a bit more for routes to stabilize
-                sleep 3
-                echo "Checking routes:"
-                ip route
                 # Check if we have a new IP
                 echo "New IP after VPN connection:"
                 curl -s https://api.ipify.org || echo "Unable to get new IP"
                 echo "VPN connection successful!"
                 exit 0
               fi
-              # Show logs every few attempts
-              if [ $((i % 5)) -eq 0 ]; then
-                echo "Current OpenVPN log (attempt $i):"
+              
+              # Show logs every attempt for better debugging
+              echo "Current OpenVPN log (attempt $i):"
+              if [ -f /tmp/openvpn.log ]; then
                 tail -n 20 /tmp/openvpn.log
+              else
+                echo "Log file does not exist yet"
               fi
+              
               sleep 3
             done
             
-            echo "VPN connection timed out. Full OpenVPN logs:"
-            cat /tmp/openvpn.log
+            echo "VPN connection timed out."
+            if [ -f /tmp/openvpn.log ]; then
+              echo "Full OpenVPN logs:"
+              cat /tmp/openvpn.log
+            else
+              echo "No OpenVPN log file found."
+            fi
             exit 1
           '
           exit_code=$?
