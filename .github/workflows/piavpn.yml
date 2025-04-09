@@ -15,21 +15,24 @@ jobs:
   rumble-vpn:
     runs-on: ubuntu-latest
     
-    # Run inside an Ubuntu container with privileges so we can start OpenVPN
+    # Run inside an ubuntu:latest container with privileges so we can manage tun0
     container:
       image: ubuntu:latest
       options: --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
-    
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Install Basic Dependencies
         run: |
+          # Avoid interactive prompts
+          export DEBIAN_FRONTEND=noninteractive
+
           apt-get update
           apt-get install -y wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg
 
-          # Libraries needed for Puppeteer's bundled Chromium
+          # The shared libraries that Puppeteer's Chromium needs
           apt-get install -y \
             fonts-liberation \
             libatk-bridge2.0-0 \
@@ -54,7 +57,8 @@ jobs:
             libxrender1 \
             libxss1 \
             libxtst6 \
-            libasound2 \
+            # NOTE: no libasound2 -> use libasound2t64 on newer Ubuntu
+            libasound2t64 \
             libasound2-plugins \
             libpulse0 \
             libxkbcommon0 \
@@ -96,11 +100,9 @@ jobs:
             echo "Attempt $i..."
             if ip a | grep -q tun0; then
               echo "VPN interface detected!"
-              
               # Override DNS resolvers
               echo 'nameserver 8.8.8.8' > /etc/resolv.conf
               echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
-              
               break
             fi
             if [ $i -eq 12 ]; then
@@ -110,14 +112,12 @@ jobs:
             sleep 5
           done
 
-          # Print external IP for debugging
-          EXTERNAL_IP=$(curl -s https://api.ipify.org)
-          echo "VPN IP: $EXTERNAL_IP"
+          echo "VPN IP: $(curl -s https://api.ipify.org)"
 
       - name: Install Puppeteer
         run: |
           npm init -y
-          # Puppeteer (full) downloads its own Chromium. The stealth plugin helps avoid detection.
+          # "puppeteer" includes a bundled Chromium.
           npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
           mkdir -p scripts screenshots logs
 
@@ -137,17 +137,17 @@ jobs:
           async function safeScreenshot(page, path) {
               try {
                   await page.screenshot({ path });
-                  console.log(`Screenshot taken: ${path}`);
+                  console.log(\`Screenshot taken: \${path}\`);
               } catch (err) {
-                  console.error(`Failed to take screenshot ${path}: ${err.message}`);
+                  console.error(\`Failed to take screenshot \${path}: \${err.message}\`);
               }
           }
 
           async function visitRumble(videoUrl) {
-              console.log(`Launching browser to visit ${videoUrl}...`);
+              console.log(\`Launching browser to visit \${videoUrl}...\`);
               const browser = await puppeteer.launch({
                   headless: 'new',
-                  executablePath: require('puppeteer').executablePath(), // use Puppeteer's Chromium
+                  executablePath: require('puppeteer').executablePath(),
                   args: ['--no-sandbox', '--disable-setuid-sandbox'],
               });
 
@@ -158,7 +158,7 @@ jobs:
               console.log('Navigating to Rumble video...');
               await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
               await sleep(3000);
-              await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
+              await safeScreenshot(page, \`./screenshots/rumble_landing_\${Date.now()}.png\`);
 
               const playButtonSelectors = [
                   '.bigPlayUIInner.ctp',
@@ -172,10 +172,10 @@ jobs:
               for (const selector of playButtonSelectors) {
                   playButton = await page.$(selector);
                   if (playButton) {
-                      console.log(`Play button found using selector: ${selector}`);
+                      console.log(\`Play button found using selector: \${selector}\`);
                       await playButton.click();
                       await sleep(3000);
-                      await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
+                      await safeScreenshot(page, \`./screenshots/rumble_play_clicked_\${Date.now()}.png\`);
                       break;
                   }
               }
@@ -184,23 +184,21 @@ jobs:
                   console.warn('Play button not found. Proceeding without clicking.');
               }
 
-              // Watch the video for ~30 seconds, taking screenshots along the way
+              // Watch 30 seconds, taking screenshots
               for (let t = 5; t <= 30; t += 5) {
                   await sleep(5000);
-                  await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
-                  
-                  // Check if video is playing
+                  await safeScreenshot(page, \`./screenshots/rumble_watch_\${t}s_\${Date.now()}.png\`);
+
                   const isPlaying = await page.evaluate(() => {
                       const video = document.querySelector('video');
                       return video && !video.paused && !video.ended && video.readyState > 2;
                   });
-          
-                  console.log(`Video playing status at ${t}s: ${isPlaying}`);
+                  console.log(\`Video playing status at \${t}s: \${isPlaying}\`);
               }
 
-              // Save final HTML content to logs
+              // Save final HTML
               const finalHtml = await page.content();
-              fs.writeFileSync(`./logs/final_page_${Date.now()}.html`, finalHtml);
+              fs.writeFileSync(\`./logs/final_page_\${Date.now()}.html\`, finalHtml);
 
               await browser.close();
               console.log('Visit completed successfully');
