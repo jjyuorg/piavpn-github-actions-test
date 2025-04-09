@@ -23,7 +23,7 @@ jobs:
           mkdir -p screenshots
           mkdir -p logs
 
-      - name: Run OpenVPN Connection with DNS Fix
+      - name: Run OpenVPN Connection with Direct DNS
         run: |
           docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c "
             set -e
@@ -35,10 +35,8 @@ jobs:
             
             # Check initial network
             echo 'Initial Network State:'
-            echo 'IP address:'
-            curl -s https://api.ipify.org || echo 'Failed to get initial IP'
-            echo 'DNS resolution:'
-            dig +short google.com
+            echo 'IP address:' \$(curl -s https://api.ipify.org)
+            echo 'DNS resolution:' \$(dig +short google.com)
             echo 'Initial DNS server:'
             cat /etc/resolv.conf
             
@@ -53,43 +51,22 @@ jobs:
             echo '${{ secrets.PIA_PASSWORD }}' >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
+            # Create directory for logs
+            mkdir -p /tmp/logs
+            
             echo 'Configuring OpenVPN with explicit DNS settings...'
             SERVER_FILE=/tmp/pia/us_east.ovpn
-            # Backup original file
-            cp \$SERVER_FILE \$SERVER_FILE.bak
             
             # Modify the config file
             sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
             sed -i 's/verb 1/verb 4/' \$SERVER_FILE
             
-            # Add DNS options for Google DNS
-            echo '# Explicitly set DNS servers' >> \$SERVER_FILE
+            # Add DNS options
             echo 'dhcp-option DNS 8.8.8.8' >> \$SERVER_FILE
             echo 'dhcp-option DNS 8.8.4.4' >> \$SERVER_FILE
-            echo 'script-security 2' >> \$SERVER_FILE
-            echo 'up /etc/openvpn/update-resolv-conf' >> \$SERVER_FILE
-            echo 'down /etc/openvpn/update-resolv-conf' >> \$SERVER_FILE
-            
-            # Create DNS update script
-            mkdir -p /etc/openvpn
-            cat > /etc/openvpn/update-resolv-conf << 'EOF'
-            #!/bin/bash
-            # Script to update DNS settings when OpenVPN connects
-            
-            # Create a new resolv.conf with Google DNS
-            cat > /etc/resolv.conf << RESOLV
-            nameserver 8.8.8.8
-            nameserver 8.8.4.4
-            options edns0 trust-ad
-            search .
-            RESOLV
-            
-            echo \"DNS configuration updated\"
-            EOF
-            chmod +x /etc/openvpn/update-resolv-conf
             
             echo 'Starting OpenVPN connection...'
-            openvpn --config \$SERVER_FILE --script-security 2 --daemon --log /tmp/openvpn.log
+            openvpn --config \$SERVER_FILE --daemon --log /tmp/openvpn.log
             
             echo 'Waiting for VPN interface to establish...'
             for i in \$(seq 1 12); do
@@ -100,37 +77,27 @@ jobs:
                 echo \"VPN routing table:\"
                 ip route
                 
-                # Wait for DNS to propagate
-                sleep 5
-                
-                # Ensure DNS is properly configured
-                echo \"Manually setting Google DNS...\"
+                # Manually override DNS to ensure it works
+                echo \"Setting Google DNS directly...\"
                 echo 'nameserver 8.8.8.8' > /etc/resolv.conf
                 echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
                 
                 echo \"Current DNS configuration:\"
                 cat /etc/resolv.conf
                 
-                # Comprehensive network testing through VPN
-                echo \"Testing DNS through VPN:\"
+                # Test DNS
+                echo \"Testing DNS resolution:\"
                 dig +short google.com
                 
-                echo \"Testing ping through VPN:\"
-                ping -c 3 8.8.8.8
-                
-                echo \"Testing traceroute through VPN:\"
-                traceroute -n -m 10 8.8.8.8
-                
-                echo \"Testing IP services through VPN:\"
-                echo \"ipify.org:\"
+                # Test IP services
+                echo \"Testing IP services:\"
                 curl -s https://api.ipify.org
                 
-                # Save logs
-                mkdir -p /tmp/logs
+                # Store logs
+                cp /tmp/openvpn.log /tmp/logs/
                 ip a > /tmp/logs/interfaces.log
                 ip route > /tmp/logs/routes.log
                 cat /etc/resolv.conf > /tmp/logs/resolv.conf
-                cat /tmp/openvpn.log > /tmp/logs/openvpn.log
                 
                 # Make logs accessible
                 chmod -R 777 /tmp/logs
@@ -144,10 +111,10 @@ jobs:
                 exit 1
               fi
               
-              # Show more logs for debugging
-              if [ \$((i % 2)) -eq 0 ]; then
+              # Display logs
+              if [ \$((i % 3)) -eq 0 ]; then
                 echo \"Current OpenVPN log:\"
-                cat /tmp/openvpn.log | tail -30
+                tail -n 20 /tmp/openvpn.log
               fi
               
               sleep 5
@@ -155,8 +122,7 @@ jobs:
           "
           
           # Copy logs from Docker
-          docker cp $(docker ps -lq):/tmp/logs ./logs
-          chmod -R 755 ./logs
+          docker cp $(docker ps -lq):/tmp/logs ./logs || echo "Failed to copy logs"
 
       - name: Upload Diagnostic Information
         if: always()
