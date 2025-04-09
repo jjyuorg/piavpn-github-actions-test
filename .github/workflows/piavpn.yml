@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Run PIA VPN using manual installation
+      - name: Run PIA VPN using alternative port
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
@@ -18,33 +18,27 @@ jobs:
             echo "Installing base dependencies..."
             apt update && apt install -y --no-install-recommends curl wget sudo iproute2 apt-transport-https gnupg ca-certificates openvpn unzip net-tools iputils-ping dnsutils
             
-            # Check initial network state
-            echo "Initial network configuration:"
-            ip a
-            echo "Initial DNS configuration:"
-            cat /etc/resolv.conf
-            echo "Initial public IP:"
-            curl -v https://api64.ipify.org
-            
             echo "Downloading PIA OpenVPN configurations..."
             mkdir -p /etc/openvpn/pia
             cd /etc/openvpn/pia
             wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
             unzip -o openvpn.zip
-            ls -la  # List the available configuration files
             
             echo "Creating credentials file..."
             echo "${{ secrets.PIA_USERNAME }}" > /etc/openvpn/pia/auth.txt
             echo "${{ secrets.PIA_PASSWORD }}" >> /etc/openvpn/pia/auth.txt
             chmod 600 /etc/openvpn/pia/auth.txt
             
-            echo "Starting OpenVPN connection with logging..."
-            # Modify the OpenVPN config to use TCP instead of UDP (sometimes helps in restricted environments)
-            cp /etc/openvpn/pia/us_east.ovpn /etc/openvpn/pia/us_east_tcp.ovpn
-            sed -i "s/udp/tcp/" /etc/openvpn/pia/us_east_tcp.ovpn
+            # Try a different server and port (port 443 is often allowed through firewalls)
+            echo "Modifying OpenVPN config to use port 443..."
+            # Copy the configuration file
+            cp /etc/openvpn/pia/us_east.ovpn /etc/openvpn/pia/custom.ovpn
             
-            # Start OpenVPN in the background with logging
-            sudo openvpn --config /etc/openvpn/pia/us_east_tcp.ovpn --auth-user-pass /etc/openvpn/pia/auth.txt --daemon --log /var/log/openvpn.log --verb 4
+            # Modify the config to use TCP port 443 (commonly allowed)
+            sed -i "s/remote.*1198 udp/remote 104.200.151.57 443 tcp/" /etc/openvpn/pia/custom.ovpn
+            
+            echo "Starting OpenVPN connection with modified configuration..."
+            sudo openvpn --config /etc/openvpn/pia/custom.ovpn --auth-user-pass /etc/openvpn/pia/auth.txt --daemon --log /var/log/openvpn.log --verb 4
             
             echo "Waiting for connection to establish..."
             for i in $(seq 1 30); do
@@ -55,10 +49,10 @@ jobs:
               fi
               sleep 2
               
-              # Check OpenVPN logs
-              if [ $i -eq 10 ] || [ $i -eq 20 ]; then
+              # Check OpenVPN logs periodically
+              if [ $((i % 5)) -eq 0 ]; then
                 echo "Current OpenVPN log:"
-                tail -n 50 /var/log/openvpn.log
+                tail -n 20 /var/log/openvpn.log
               fi
             done
             
@@ -70,9 +64,6 @@ jobs:
               ip a
               exit 1
             fi
-            
-            echo "VPN interface found, checking routing:"
-            ip route
             
             echo "Testing connection..."
             echo "Current public IP: $(curl -s https://api64.ipify.org)"
