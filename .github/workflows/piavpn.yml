@@ -21,25 +21,23 @@ jobs:
             echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
             
-            # Create minimal OpenVPN config
-            cat > /tmp/pia/pia.ovpn << EOF
-client
-dev tun
-proto tcp
-remote ny.privateinternetaccess.com 443
-resolv-retry infinite
-nobind
-persist-key
-persist-tun
-cipher aes-128-cbc
-auth sha1
-tls-client
-remote-cert-tls server
-auth-user-pass /tmp/pia/auth.txt
-comp-lzo
-verb 1
-reneg-sec 0
-EOF
+            # Create minimal OpenVPN config without using heredoc
+            echo "client" > /tmp/pia/pia.ovpn
+            echo "dev tun" >> /tmp/pia/pia.ovpn
+            echo "proto tcp" >> /tmp/pia/pia.ovpn
+            echo "remote ny.privateinternetaccess.com 443" >> /tmp/pia/pia.ovpn
+            echo "resolv-retry infinite" >> /tmp/pia/pia.ovpn
+            echo "nobind" >> /tmp/pia/pia.ovpn
+            echo "persist-key" >> /tmp/pia/pia.ovpn
+            echo "persist-tun" >> /tmp/pia/pia.ovpn
+            echo "cipher aes-128-cbc" >> /tmp/pia/pia.ovpn
+            echo "auth sha1" >> /tmp/pia/pia.ovpn
+            echo "tls-client" >> /tmp/pia/pia.ovpn
+            echo "remote-cert-tls server" >> /tmp/pia/pia.ovpn
+            echo "auth-user-pass /tmp/pia/auth.txt" >> /tmp/pia/pia.ovpn
+            echo "comp-lzo" >> /tmp/pia/pia.ovpn
+            echo "verb 1" >> /tmp/pia/pia.ovpn
+            echo "reneg-sec 0" >> /tmp/pia/pia.ovpn
             
             # Download CA certificate
             wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O /tmp/pia/ca.rsa.4096.crt
