@@ -1,126 +1,101 @@
-name: Test PIA VPN Files and Connectivity
+name: Test PIA VPN Connection (TCP 443)
 on:
   push:           # Runs automatically on each commit
   workflow_dispatch:  # Also allows manual triggering
 jobs:
-  test-pia-files:
+  test-pia-vpn:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        
-      - name: Test Network Connectivity to PIA Servers
+      - name: Run PIA VPN with Working TCP Configuration
         run: |
-          echo "Testing general internet connectivity..."
-          curl -s https://api.github.com/meta | head -10
-          
-          echo "Testing connection to PIA website..."
-          curl -v https://www.privateinternetaccess.com/ 2>&1 | grep "< HTTP"
-          
-          echo "Downloading PIA OpenVPN configuration files..."
-          mkdir -p pia_configs
-          cd pia_configs
-          wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
-          
-          echo "Listing downloaded PIA OpenVPN configurations:"
-          unzip -l openvpn.zip
-          
-          echo "Testing connectivity to common PIA server IPs..."
-          echo "Testing TCP port 443 connectivity to PIA NY server:"
-          timeout 5 nc -vz 193.37.253.181 443 || echo "Connection failed"
-          
-          echo "Testing UDP port 1198 connectivity to PIA NY server:"
-          timeout 5 nc -vu 193.37.253.181 1198 || echo "UDP connection test may be inconclusive"
-          
-          echo "Testing UDP port 53 connectivity to PIA NY server:"
-          timeout 5 nc -vu 193.37.253.181 53 || echo "UDP connection test may be inconclusive"
-          
-          echo "Testing direct connection to PIA API:"
-          curl -v https://serverlist.piaservers.net/vpninfo/servers/v6 2>&1 | head -20
-      
-      - name: Test PIA VPN Minimal Connection
-        run: |
+          # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
           docker run --rm --privileged --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            echo "Installing minimal dependencies..."
-            apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2 dnsutils netcat-openbsd
+            echo "Installing dependencies..."
+            apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2
             
-            echo "Downloading PIA server list to find active servers..."
-            curl -s https://serverlist.piaservers.net/vpninfo/servers/v6 > /tmp/pia_servers.json
-            echo "Sample of server information:"
-            head -20 /tmp/pia_servers.json
+            # Record initial state
+            echo "Initial IP:"
+            curl -s https://api.ipify.org || echo "Unable to get initial IP"
             
-            echo "Testing connectivity to multiple PIA servers with various protocols and ports..."
-            # Test TCP connectivity to several PIA servers on port 443
-            echo "Testing TCP port 443 connections to multiple PIA servers:"
-            for ip in 193.37.253.181 84.17.62.130 84.17.59.50 84.17.59.130 84.17.57.98; do
-              echo "Testing $ip:443 (TCP)..."
-              timeout 2 nc -vz $ip 443 || echo "Connection failed"
+            echo "Setting up optimized OpenVPN configuration..."
+            mkdir -p /tmp/pia
+            
+            # Create optimized config
+            echo "client" > /tmp/pia/pia.ovpn
+            echo "dev tun" >> /tmp/pia/pia.ovpn
+            echo "proto tcp" >> /tmp/pia/pia.ovpn
+            # Server with confirmed TCP 443 connectivity
+            echo "remote 84.17.62.130 443" >> /tmp/pia/pia.ovpn
+            echo "resolv-retry infinite" >> /tmp/pia/pia.ovpn
+            echo "nobind" >> /tmp/pia/pia.ovpn
+            echo "persist-key" >> /tmp/pia/pia.ovpn
+            echo "persist-tun" >> /tmp/pia/pia.ovpn
+            # Use optimal encryption settings
+            echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305" >> /tmp/pia/pia.ovpn
+            echo "auth SHA256" >> /tmp/pia/pia.ovpn
+            echo "tls-client" >> /tmp/pia/pia.ovpn
+            echo "remote-cert-tls server" >> /tmp/pia/pia.ovpn
+            echo "auth-user-pass /tmp/pia/auth.txt" >> /tmp/pia/pia.ovpn
+            # Disable compression for better security
+            echo "compress" >> /tmp/pia/pia.ovpn
+            # Increase verbosity for better debugging
+            echo "verb 5" >> /tmp/pia/pia.ovpn
+            echo "connect-retry 5 5" >> /tmp/pia/pia.ovpn
+            # Faster connection timeout
+            echo "connect-timeout 10" >> /tmp/pia/pia.ovpn
+            # Add explicit DNS settings
+            echo "dhcp-option DNS 8.8.8.8" >> /tmp/pia/pia.ovpn
+            echo "dhcp-option DNS 8.8.4.4" >> /tmp/pia/pia.ovpn
+            # Set client to pull settings from server
+            echo "pull" >> /tmp/pia/pia.ovpn
+            # Add fast-io for better performance
+            echo "fast-io" >> /tmp/pia/pia.ovpn
+            
+            # Download CA certificate
+            wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O /tmp/pia/ca.rsa.4096.crt
+            echo "ca /tmp/pia/ca.rsa.4096.crt" >> /tmp/pia/pia.ovpn
+            
+            echo "Creating credentials file..."
+            echo "${{ secrets.PIA_USERNAME }}" > /tmp/pia/auth.txt
+            echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
+            chmod 600 /tmp/pia/auth.txt
+            
+            echo "Starting OpenVPN connection..."
+            openvpn --config /tmp/pia/pia.ovpn --daemon --log /tmp/openvpn.log
+            
+            echo "Waiting for VPN interface to establish..."
+            for i in $(seq 1 30); do
+              echo "Checking for VPN interface (attempt $i)..."
+              if ip a | grep -q tun0; then
+                echo "VPN interface detected!"
+                ip a show tun0
+                # Wait a bit more for routes to stabilize
+                sleep 3
+                echo "Checking routes:"
+                ip route
+                # Check if we have a new IP
+                echo "New IP after VPN connection:"
+                curl -s https://api.ipify.org || echo "Unable to get new IP"
+                echo "VPN connection successful!"
+                exit 0
+              fi
+              # Show logs every few attempts
+              if [ $((i % 5)) -eq 0 ]; then
+                echo "Current OpenVPN log (attempt $i):"
+                tail -n 20 /tmp/openvpn.log
+              fi
+              sleep 3
             done
             
-            # Test UDP connectivity to several PIA servers
-            echo "Testing UDP port 53 connections to multiple PIA servers:"
-            for ip in 193.37.253.181 84.17.62.130 84.17.59.50 84.17.59.130 84.17.57.98; do
-              echo "Testing $ip:53 (UDP)..."
-              timeout 2 nc -vu $ip 53 || echo "Connection test inconclusive"
-            done
-            
-            echo "Creating minimal OpenVPN test configs for multiple servers and ports..."
-            mkdir -p /tmp/pia_tests
-            
-            # Create minimal configs for different servers and protocols
-            for proto in tcp udp; do
-              for port in 443 1198 53; do
-                for ip in 193.37.253.181 84.17.62.130; do
-                  test_dir="/tmp/pia_tests/${ip}_${proto}_${port}"
-                  mkdir -p $test_dir
-                  
-                  echo "client" > $test_dir/config.ovpn
-                  echo "dev tun" >> $test_dir/config.ovpn
-                  echo "proto $proto" >> $test_dir/config.ovpn
-                  echo "remote $ip $port" >> $test_dir/config.ovpn
-                  echo "resolv-retry infinite" >> $test_dir/config.ovpn
-                  echo "nobind" >> $test_dir/config.ovpn
-                  echo "persist-key" >> $test_dir/config.ovpn
-                  echo "persist-tun" >> $test_dir/config.ovpn
-                  echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305" >> $test_dir/config.ovpn
-                  echo "auth SHA256" >> $test_dir/config.ovpn
-                  echo "tls-client" >> $test_dir/config.ovpn
-                  echo "remote-cert-tls server" >> $test_dir/config.ovpn
-                  echo "auth-user-pass auth.txt" >> $test_dir/config.ovpn
-                  echo "verb 4" >> $test_dir/config.ovpn
-                  echo "connect-retry 2 5" >> $test_dir/config.ovpn
-                  echo "connect-timeout 5" >> $test_dir/config.ovpn
-                  echo "dhcp-option DNS 8.8.8.8" >> $test_dir/config.ovpn
-                  
-                  # Create auth file
-                  echo "${{ secrets.PIA_USERNAME }}" > $test_dir/auth.txt
-                  echo "${{ secrets.PIA_PASSWORD }}" >> $test_dir/auth.txt
-                  chmod 600 $test_dir/auth.txt
-                  
-                  # Download CA cert
-                  wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O $test_dir/ca.rsa.4096.crt
-                  echo "ca ca.rsa.4096.crt" >> $test_dir/config.ovpn
-                  
-                  echo "Created test config for $ip using $proto on port $port"
-                done
-              done
-            done
-            
-            echo "Testing short connection attempts to different configurations..."
-            for test_dir in /tmp/pia_tests/*; do
-              config=$(basename $test_dir)
-              echo "Testing connection with $config"
-              cd $test_dir
-              timeout 7 openvpn --config config.ovpn --log openvpn.log &
-              pid=$!
-              sleep 5
-              kill -15 $pid 2>/dev/null || true
-              echo "OpenVPN log excerpt for $config:"
-              tail -10 openvpn.log
-              echo "----------------------------------------"
-            done
+            echo "VPN connection timed out. Full OpenVPN logs:"
+            cat /tmp/openvpn.log
+            exit 1
           '
-          echo "Docker exit code: $?"
+          exit_code=$?
+          echo "Docker run exit code: $exit_code"
+          exit $exit_code
