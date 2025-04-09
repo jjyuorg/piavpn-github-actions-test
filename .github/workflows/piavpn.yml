@@ -23,7 +23,7 @@ jobs:
           mkdir -p screenshots
           mkdir -p logs
 
-      - name: Run OpenVPN Connection and Network Diagnostics
+      - name: Run OpenVPN Connection with DNS Fix
         run: |
           docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c "
             set -e
@@ -39,8 +39,8 @@ jobs:
             curl -s https://api.ipify.org || echo 'Failed to get initial IP'
             echo 'DNS resolution:'
             dig +short google.com
-            echo 'Traceroute to Google DNS:'
-            traceroute -n -m 5 8.8.8.8 || echo 'Initial traceroute failed'
+            echo 'Initial DNS server:'
+            cat /etc/resolv.conf
             
             echo 'Setting up OpenVPN connection to PIA...'
             mkdir -p /tmp/pia
@@ -53,12 +53,43 @@ jobs:
             echo '${{ secrets.PIA_PASSWORD }}' >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
-            echo 'Starting OpenVPN connection...'
+            echo 'Configuring OpenVPN with explicit DNS settings...'
             SERVER_FILE=/tmp/pia/us_east.ovpn
+            # Backup original file
+            cp \$SERVER_FILE \$SERVER_FILE.bak
+            
+            # Modify the config file
             sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
-            # Enable more verbose logging
             sed -i 's/verb 1/verb 4/' \$SERVER_FILE
-            openvpn --config \$SERVER_FILE --daemon --log /tmp/openvpn.log
+            
+            # Add DNS options for Google DNS
+            echo '# Explicitly set DNS servers' >> \$SERVER_FILE
+            echo 'dhcp-option DNS 8.8.8.8' >> \$SERVER_FILE
+            echo 'dhcp-option DNS 8.8.4.4' >> \$SERVER_FILE
+            echo 'script-security 2' >> \$SERVER_FILE
+            echo 'up /etc/openvpn/update-resolv-conf' >> \$SERVER_FILE
+            echo 'down /etc/openvpn/update-resolv-conf' >> \$SERVER_FILE
+            
+            # Create DNS update script
+            mkdir -p /etc/openvpn
+            cat > /etc/openvpn/update-resolv-conf << 'EOF'
+            #!/bin/bash
+            # Script to update DNS settings when OpenVPN connects
+            
+            # Create a new resolv.conf with Google DNS
+            cat > /etc/resolv.conf << RESOLV
+            nameserver 8.8.8.8
+            nameserver 8.8.4.4
+            options edns0 trust-ad
+            search .
+            RESOLV
+            
+            echo \"DNS configuration updated\"
+            EOF
+            chmod +x /etc/openvpn/update-resolv-conf
+            
+            echo 'Starting OpenVPN connection...'
+            openvpn --config \$SERVER_FILE --script-security 2 --daemon --log /tmp/openvpn.log
             
             echo 'Waiting for VPN interface to establish...'
             for i in \$(seq 1 12); do
@@ -69,51 +100,47 @@ jobs:
                 echo \"VPN routing table:\"
                 ip route
                 
-                # Wait a bit for routes to establish
+                # Wait for DNS to propagate
                 sleep 5
+                
+                # Ensure DNS is properly configured
+                echo \"Manually setting Google DNS...\"
+                echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+                echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
+                
+                echo \"Current DNS configuration:\"
+                cat /etc/resolv.conf
                 
                 # Comprehensive network testing through VPN
                 echo \"Testing DNS through VPN:\"
-                dig +short google.com || echo \"DNS resolution failed through VPN\"
+                dig +short google.com
                 
                 echo \"Testing ping through VPN:\"
-                ping -c 3 8.8.8.8 || echo \"Ping failed through VPN\"
+                ping -c 3 8.8.8.8
                 
                 echo \"Testing traceroute through VPN:\"
-                traceroute -n -m 10 8.8.8.8 || echo \"Traceroute failed through VPN\"
+                traceroute -n -m 10 8.8.8.8
                 
-                echo \"Testing multiple IP services through VPN:\"
+                echo \"Testing IP services through VPN:\"
                 echo \"ipify.org:\"
-                curl -s https://api.ipify.org || echo \"ipify.org timed out\"
+                curl -s https://api.ipify.org
                 
-                echo \"ifconfig.me:\"
-                curl -s https://ifconfig.me || echo \"ifconfig.me timed out\"
-                
-                echo \"icanhazip.com:\"
-                curl -s https://icanhazip.com || echo \"icanhazip.com timed out\"
-                
-                echo \"ip.me:\"
-                curl -s https://ip.me || echo \"ip.me timed out\"
-                
-                echo \"VPN logs:\"
-                cat /tmp/openvpn.log > /dev/stdout
-                cp /tmp/openvpn.log /tmp/logs/openvpn.log
-                
-                echo \"Network diagnostics complete\"
-                # Create logs directory and save results
+                # Save logs
                 mkdir -p /tmp/logs
                 ip a > /tmp/logs/interfaces.log
                 ip route > /tmp/logs/routes.log
+                cat /etc/resolv.conf > /tmp/logs/resolv.conf
+                cat /tmp/openvpn.log > /tmp/logs/openvpn.log
+                
+                # Make logs accessible
+                chmod -R 777 /tmp/logs
                 break
               fi
               
               if [ \$i -eq 12 ]; then
                 echo \"VPN Connection Failed\"
-                cat /tmp/openvpn.log > /dev/stdout
-                
-                # Create logs directory and save failure logs
-                mkdir -p /tmp/logs
                 cat /tmp/openvpn.log > /tmp/logs/openvpn.log
+                chmod -R 777 /tmp/logs
                 exit 1
               fi
               
@@ -125,9 +152,6 @@ jobs:
               
               sleep 5
             done
-            
-            # Make logs accessible to the host user
-            chmod -R 777 /tmp/logs
           "
           
           # Copy logs from Docker
