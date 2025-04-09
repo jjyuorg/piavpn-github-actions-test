@@ -15,7 +15,7 @@ jobs:
   rumble-vpn:
     runs-on: ubuntu-latest
     
-    # Run inside an ubuntu:latest container with privileges so we can create tun0
+    # Use an ubuntu:latest container, privileged for tun0 creation
     container:
       image: ubuntu:latest
       options: --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
@@ -26,13 +26,11 @@ jobs:
 
       - name: Install Basic Dependencies
         run: |
-          # Avoid interactive prompts (Debconf)
           export DEBIAN_FRONTEND=noninteractive
-
           apt-get update
           apt-get install -y wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg
 
-          # Puppeteer shared libs except for ALSA (we'll handle that below)
+          # Puppeteer shared libs (but skip ALSA; we'll handle that separately)
           apt-get install -y \
             fonts-liberation \
             libatk-bridge2.0-0 \
@@ -65,7 +63,7 @@ jobs:
           # Fallback approach for ALSA libraries
           apt-get install -y libasound2 libasound2-plugins || \
           apt-get install -y libasound2t64 libasound2-plugins || \
-          echo "Warning: no ALSA package was installed."
+          echo "Warning: neither libasound2 nor libasound2t64 was installed."
 
           # Install Node.js 20.x
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
@@ -88,13 +86,12 @@ jobs:
           echo "$PIA_PASSWORD" >> auth.txt
           chmod 600 auth.txt
 
-          echo "Updating .ovpn configuration for DNS and credentials..."
           SERVER_FILE=us_east.ovpn
           sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' $SERVER_FILE
           echo 'dhcp-option DNS 8.8.8.8' >> $SERVER_FILE
           echo 'dhcp-option DNS 8.8.4.4' >> $SERVER_FILE
 
-          echo "Starting OpenVPN in the background..."
+          echo "Starting OpenVPN in background..."
           openvpn --config $SERVER_FILE --daemon --log /workspace/openvpn.log
 
           echo "Waiting for VPN interface (tun0)..."
@@ -102,13 +99,13 @@ jobs:
             echo "Attempt $i..."
             if ip a | grep -q tun0; then
               echo "VPN interface detected!"
-              # Override DNS resolvers
+              # Override DNS
               echo 'nameserver 8.8.8.8' > /etc/resolv.conf
               echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
               break
             fi
             if [ $i -eq 12 ]; then
-              echo "VPN connection failed"
+              echo "VPN connection failed."
               exit 1
             fi
             sleep 5
@@ -119,7 +116,6 @@ jobs:
       - name: Install Puppeteer
         run: |
           npm init -y
-          # Puppeteer includes a bundled Chromium (no Snap needed).
           npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
           mkdir -p scripts screenshots logs
 
@@ -133,87 +129,92 @@ jobs:
           puppeteer.use(StealthPlugin());
 
           function sleep(ms) {
-              return new Promise(resolve => setTimeout(resolve, ms));
+            return new Promise(resolve => setTimeout(resolve, ms));
           }
 
           async function safeScreenshot(page, path) {
-              try {
-                  await page.screenshot({ path });
-                  console.log(\`Screenshot taken: \${path}\`);
-              } catch (err) {
-                  console.error(\`Failed to take screenshot \${path}: \${err.message}\`);
-              }
+            try {
+              await page.screenshot({ path });
+              console.log(`Screenshot taken: ${path}`);
+            } catch (err) {
+              console.error(`Failed to take screenshot ${path}: ${err.message}`);
+            }
           }
 
           async function visitRumble(videoUrl) {
-              console.log(\`Launching browser to visit \${videoUrl}...\`);
-              const browser = await puppeteer.launch({
-                  headless: 'new',
-                  executablePath: require('puppeteer').executablePath(),
-                  args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            console.log(`Launching browser to visit ${videoUrl}...`);
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              executablePath: require('puppeteer').executablePath(),
+              args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            });
+
+            const page = await browser.newPage();
+            await page.setUserAgent(
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36'
+            );
+            await page.setCacheEnabled(false);
+
+            console.log('Navigating to Rumble video...');
+            await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+            await sleep(3000);
+            await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
+
+            const playButtonSelectors = [
+              '.bigPlayUIInner.ctp',
+              'button[aria-label="Play"]',
+              '.vjs-big-play-button',
+              '.icon-play',
+              'div[class*=play]'
+            ];
+
+            let playButton = null;
+            for (const selector of playButtonSelectors) {
+              playButton = await page.$(selector);
+              if (playButton) {
+                console.log(`Play button found using selector: ${selector}`);
+                await playButton.click();
+                await sleep(3000);
+                await safeScreenshot(
+                  page,
+                  `./screenshots/rumble_play_clicked_${Date.now()}.png`
+                );
+                break;
+              }
+            }
+
+            if (!playButton) {
+              console.warn('Play button not found. Proceeding without clicking.');
+            }
+
+            // Watch for 30s, taking screenshots in 5s intervals
+            for (let t = 5; t <= 30; t += 5) {
+              await sleep(5000);
+              await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
+
+              const isPlaying = await page.evaluate(() => {
+                const video = document.querySelector('video');
+                return video && !video.paused && !video.ended && video.readyState > 2;
               });
+              console.log(`Video playing status at ${t}s: ${isPlaying}`);
+            }
 
-              const page = await browser.newPage();
-              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
-              await page.setCacheEnabled(false);
+            // Save final HTML
+            const finalHtml = await page.content();
+            fs.writeFileSync(`./logs/final_page_${Date.now()}.html`, finalHtml);
 
-              console.log('Navigating to Rumble video...');
-              await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-              await sleep(3000);
-              await safeScreenshot(page, \`./screenshots/rumble_landing_\${Date.now()}.png\`);
-
-              const playButtonSelectors = [
-                  '.bigPlayUIInner.ctp',
-                  'button[aria-label="Play"]',
-                  '.vjs-big-play-button',
-                  '.icon-play',
-                  'div[class*=play]'
-              ];
-
-              let playButton = null;
-              for (const selector of playButtonSelectors) {
-                  playButton = await page.$(selector);
-                  if (playButton) {
-                      console.log(\`Play button found using selector: \${selector}\`);
-                      await playButton.click();
-                      await sleep(3000);
-                      await safeScreenshot(page, \`./screenshots/rumble_play_clicked_\${Date.now()}.png\`);
-                      break;
-                  }
-              }
-
-              if (!playButton) {
-                  console.warn('Play button not found. Proceeding without clicking.');
-              }
-
-              // Watch 30 seconds, taking screenshots
-              for (let t = 5; t <= 30; t += 5) {
-                  await sleep(5000);
-                  await safeScreenshot(page, \`./screenshots/rumble_watch_\${t}s_\${Date.now()}.png\`);
-
-                  const isPlaying = await page.evaluate(() => {
-                      const video = document.querySelector('video');
-                      return video && !video.paused && !video.ended && video.readyState > 2;
-                  });
-                  console.log(\`Video playing status at \${t}s: \${isPlaying}\`);
-              }
-
-              // Save final HTML
-              const finalHtml = await page.content();
-              fs.writeFileSync(\`./logs/final_page_\${Date.now()}.html\`, finalHtml);
-
-              await browser.close();
-              console.log('Visit completed successfully');
+            await browser.close();
+            console.log('Visit completed successfully');
           }
 
           async function main() {
-              try {
-                  const videoUrl = process.argv[2] || 'https://rumble.com/v6r0vz6-automate.html';
-                  await visitRumble(videoUrl);
-              } catch (error) {
-                  console.error('Error in script:', error);
-                  process.exit(1);
-              }
+            try {
+              const videoUrl = process.argv[2] || 'https://rumble.com/v6r0vz6-automate.html';
+              await visitRumble(videoUrl);
+            } catch (error) {
+              console.error('Error in script:', error);
+              process.exit(1);
+            }
           }
 
           main();
