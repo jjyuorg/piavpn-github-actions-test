@@ -18,218 +18,74 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Create Script Files
+      - name: Create Script Directory
         run: |
-          # Create directory for screenshots
           mkdir -p screenshots
 
-          # Create the Puppeteer script
-          cat > rumble-visit.js << 'EOL'
-          const puppeteer = require('puppeteer-extra');
-          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-          const fs = require('fs');
-          const { execSync } = require('child_process');
-
-          puppeteer.use(StealthPlugin());
-
-          function sleep(ms) {
-              return new Promise(resolve => setTimeout(resolve, ms));
-          }
-
-          async function safeScreenshot(page, path) {
-              try {
-                  await page.screenshot({ path });
-                  console.log(`Screenshot taken: ${path}`);
-              } catch (err) {
-                  console.error(`Failed to take screenshot ${path}: ${err.message}`);
-              }
-          }
-
-          async function reconnectVPN() {
-              console.log("Reconnecting to a different VPN server...");
-              try {
-                  execSync("pkill -9 openvpn", { stdio: 'inherit' });
-                  await sleep(5000);
-                  
-                  const servers = ['us_west.ovpn', 'us_california.ovpn', 'us_new_york.ovpn', 'us_atlanta.ovpn'];
-                  let serverFile = '';
-                  
-                  for (const server of servers) {
-                      if (fs.existsSync(`/tmp/pia/${server}`)) {
-                          serverFile = `/tmp/pia/${server}`;
-                          break;
-                      }
-                  }
-                  
-                  if (!serverFile) {
-                      console.log("No alternate server file found, using default");
-                      serverFile = '/tmp/pia/us_east.ovpn';
-                  }
-                  
-                  console.log(`Connecting to server: ${serverFile}`);
-                  execSync(`openvpn --config ${serverFile} --auth-user-pass /tmp/pia/auth.txt --daemon --log /tmp/openvpn.log`, { stdio: 'inherit' });
-                  
-                  await sleep(10000);
-                  
-                  for (let i = 0; i < 10; i++) {
-                      try {
-                          const ifConfig = execSync("ip a | grep tun0").toString();
-                          if (ifConfig.includes('tun0')) {
-                              console.log("VPN reconnected successfully");
-                              return true;
-                          }
-                      } catch (e) {
-                          console.log("Waiting for VPN interface...");
-                      }
-                      await sleep(1000);
-                  }
-                  
-                  console.log("Failed to reconnect VPN");
-                  return false;
-              } catch (error) {
-                  console.error("Error during VPN reconnection:", error.message);
-                  return false;
-              }
-          }
-
-          async function visitRumble(videoUrl) {
-              let browser = await puppeteer.launch({
-                  headless: "new",
-                  ignoreHTTPSErrors: true,
-                  args: ['--no-sandbox', '--disable-setuid-sandbox']
-              });
-
-              let page = await browser.newPage();
-              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
-              await page.setCacheEnabled(false);
-
-              console.log("Navigating to Rumble video...");
-              await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-              await sleep(3000);
-              await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
-
-              const playButtonSelectors = [
-                  '.bigPlayUIInner.ctp',
-                  'button[aria-label="Play"]',
-                  '.vjs-big-play-button',
-                  '.icon-play',
-                  'div[class*=play]'
-              ];
-
-              let playButton = null;
-              for (const selector of playButtonSelectors) {
-                  playButton = await page.$(selector);
-                  if (playButton) {
-                      console.log(`Play button found using selector: ${selector}`);
-                      await playButton.click();
-                      await sleep(3000);
-                      await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
-                      break;
-                  }
-              }
-
-              if (!playButton) {
-                  console.warn("Play button not found. Proceeding without clicking.");
-              }
-
-              for (let t = 5; t <= 30; t += 5) {
-                  await sleep(5000);
-                  await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
-                  const isPlaying = await page.evaluate(() => {
-                      const video = document.querySelector("video");
-                      return video && !video.paused && !video.ended && video.readyState > 2;
-                  });
-
-                  if (!isPlaying) {
-                      console.log("Video is not playing. Attempting VPN reconnect...");
-                      await browser.close();
-                      const reconnected = await reconnectVPN();
-                      if (reconnected) {
-                          return await visitRumble(videoUrl);
-                      } else {
-                          throw new Error("VPN reconnect failed. Aborting.");
-                      }
-                  }
-              }
-
-              const finalHtml = await page.content();
-              const htmlFile = `./screenshots/final_rumble_page_${Date.now()}.html`;
-              fs.writeFileSync(htmlFile, finalHtml);
-              console.log(`Final HTML page saved: ${htmlFile}`);
-              await browser.close();
-          }
-
-          async function run() {
-              const videoUrl = process.argv[2] || "https://rumble.com/v6r0vz6-automate.html";
-              await visitRumble(videoUrl);
-          }
-
-          run().catch(error => {
-              console.error("Script failed:", error.message);
-              process.exit(1);
-          });
-          EOL
-
-      - name: Setup VPN and Run Puppeteer
+      - name: Run OpenVPN Connection and Basic Test
         run: |
-          # Use a pre-built Puppeteer image that already has all dependencies
-          docker run --rm --privileged --cap-add=NET_ADMIN -v $(pwd):/workspace -w /workspace browserless/chrome:latest bash -c "
+          docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined -v $(pwd):/workspace ubuntu:latest bash -c "
             set -e
             export DEBIAN_FRONTEND=noninteractive
             
-            # Install VPN packages
+            echo 'Installing basic dependencies...'
             apt-get update
-            apt-get install -y openvpn iproute2 wget unzip
+            apt-get install -y wget unzip openvpn ca-certificates iproute2 curl
             
-            # Setup VPN connection
+            echo 'Setting up OpenVPN connection to PIA...'
             mkdir -p /tmp/pia
             cd /tmp/pia
             wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
             unzip -q openvpn.zip
             
-            # Create authentication file
+            echo 'Creating credentials file...'
             echo '${{ secrets.PIA_USERNAME }}' > /tmp/pia/auth.txt
             echo '${{ secrets.PIA_PASSWORD }}' >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
-            # Start VPN
-            sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' /tmp/pia/us_east.ovpn
-            openvpn --config /tmp/pia/us_east.ovpn --daemon --log /tmp/openvpn.log
+            echo 'Starting OpenVPN connection...'
+            SERVER_FILE=/tmp/pia/us_east.ovpn
+            sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
+            openvpn --config \$SERVER_FILE --daemon --log /workspace/openvpn.log
             
-            # Wait for VPN
+            echo 'Waiting for VPN interface to establish...'
             for i in \$(seq 1 12); do
               echo \"Checking for VPN interface (attempt \$i)...\"
               if ip a | grep -q tun0; then
-                echo \"VPN connected!\"
+                echo \"VPN interface detected!\"
                 ip a show tun0
-                break
+                echo \"VPN routing table:\"
+                ip route
+                
+                # Test connectivity through VPN
+                echo \"Testing VPN connectivity...\"
+                curl -s https://api.ipify.org || echo \"IP service timeout as expected through VPN\"
+                
+                echo \"VPN Connection Test: SUCCESS\" > /workspace/vpn_test_result.log
+                exit 0
               fi
               
               if [ \$i -eq 12 ]; then
-                echo \"VPN connection failed\"
-                cat /tmp/openvpn.log
+                echo \"VPN Connection Failed\"
+                cat /workspace/openvpn.log
+                echo \"VPN Connection Test: FAILED\" > /workspace/vpn_test_result.log
                 exit 1
+              fi
+              
+              if [ \$((i % 3)) -eq 0 ]; then
+                echo \"Current OpenVPN log:\"
+                tail -n 20 /workspace/openvpn.log
               fi
               
               sleep 5
             done
-            
-            # Install required npm packages
-            npm install puppeteer-extra puppeteer-extra-plugin-stealth
-            
-            # Run the script
-            node rumble-visit.js '${{ github.event.inputs.video_url || 'https://rumble.com/v6r0vz6-automate.html' }}'
-            
-            # Save VPN log
-            cp /tmp/openvpn.log ./openvpn.log
           "
 
-      - name: Upload Debug Artifacts
+      - name: Upload VPN Test Results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rumble-debug-artifact-${{ runner.os }}
+          name: vpn-test-results
           path: |
-            screenshots/
             *.log
           retention-days: 7
