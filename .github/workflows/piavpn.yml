@@ -8,56 +8,40 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Test Network Connectivity
-        run: |
-          echo "Testing network connectivity..."
-          echo "Current IP from ipify:"
-          curl -v https://api.ipify.org
-          echo "Current IP from ifconfig.me:"
-          curl -v https://ifconfig.me
-          echo "Current IP from ipinfo.io:"
-          curl -v https://ipinfo.io/ip
-          echo "DNS lookup test:"
-          dig privateinternetaccess.com
-          
-      - name: Run PIA VPN with basic connectivity
+      - name: Run PIA VPN Connection
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
           docker run --rm --privileged --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            echo "Installing minimal dependencies..."
+            echo "Installing dependencies..."
             apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates
             
-            echo "Network diagnostics..."
-            echo "Checking connectivity to PIA servers:"
-            ping -c 4 privateinternetaccess.com || echo "Ping failed but continuing"
-            echo "Testing DNS resolution:"
-            getent hosts privateinternetaccess.com || echo "DNS lookup failed but continuing"
-            
-            echo "Creating bare minimum OpenVPN config..."
+            echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
-            cat > /tmp/pia/pia.ovpn << EOF
-            client
-            dev tun
-            proto tcp
-            remote ny.privateinternetaccess.com 443
-            resolv-retry infinite
-            nobind
-            persist-key
-            persist-tun
-            cipher aes-128-cbc
-            auth sha1
-            tls-client
-            remote-cert-tls server
-            auth-user-pass /tmp/pia/auth.txt
-            comp-lzo
-            verb 1
-            reneg-sec 0
-            EOF
             
-            # Download CA certificate directly
+            # Create minimal OpenVPN config
+            cat > /tmp/pia/pia.ovpn << EOF
+client
+dev tun
+proto tcp
+remote ny.privateinternetaccess.com 443
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+cipher aes-128-cbc
+auth sha1
+tls-client
+remote-cert-tls server
+auth-user-pass /tmp/pia/auth.txt
+comp-lzo
+verb 1
+reneg-sec 0
+EOF
+            
+            # Download CA certificate
             wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O /tmp/pia/ca.rsa.4096.crt
             echo "ca /tmp/pia/ca.rsa.4096.crt" >> /tmp/pia/pia.ovpn
             
@@ -66,33 +50,24 @@ jobs:
             echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
-            echo "Starting OpenVPN with minimal config and debugging enabled..."
-            openvpn --config /tmp/pia/pia.ovpn --daemon --log /tmp/openvpn.log --verb 5
+            echo "Starting OpenVPN connection..."
+            openvpn --config /tmp/pia/pia.ovpn --daemon --log /tmp/openvpn.log
             
-            echo "Waiting for VPN interface..."
+            echo "Waiting for VPN interface to establish..."
             for i in $(seq 1 10); do
-              echo "Check $i for VPN interface..."
+              echo "Checking for VPN interface (attempt $i)..."
               if ip a | grep -q tun0; then
                 echo "VPN interface detected!"
                 ip a show tun0
-                break
-              fi
-              if [ $i -eq 5 ]; then
-                echo "Partial OpenVPN log:"
-                cat /tmp/openvpn.log
+                echo "VPN connection successful!"
+                exit 0
               fi
               sleep 3
             done
             
-            # Simply check if the VPN interface exists as a success criteria
-            if ip a | grep -q tun0; then
-              echo "VPN connection established successfully!"
-              exit 0
-            else
-              echo "VPN connection failed. OpenVPN log:"
-              cat /tmp/openvpn.log
-              exit 1
-            fi
+            echo "VPN connection timed out. OpenVPN logs:"
+            cat /tmp/openvpn.log
+            exit 1
           '
           exit_code=$?
           echo "Docker run exit code: $exit_code"
