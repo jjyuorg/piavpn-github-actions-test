@@ -16,8 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ubuntu:24.04
-      options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro
-      entrypoint: ["/sbin/init"]
+      # Use Docker options to enable systemd by setting privileged mode,
+      # mounting /run, /run/lock, /sys/fs/cgroup and setting the entrypoint.
+      options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro --entrypoint /sbin/init
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -38,16 +39,16 @@ jobs:
           echo "Downloading PIA client..."
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           chmod +x pia.run
-          # Create non-root user 'piauser' if needed.
+          # Create non-root user 'piauser' if it does not exist.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
           # Configure passwordless sudo for piauser.
           echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
           echo "Installing PIA client as piauser..."
-          # Run the installer as piauser.
+          # Run the installer as piauser; ignore exit errors (from systemd calls).
           su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
-          # Copy piactl to /usr/local/bin
+          # Copy piactl so that it is available in the PATH.
           sudo cp /home/piauser/pia/bin/piactl /usr/local/bin/ || { echo "piactl not found after installation. Exiting."; exit 1; }
           echo "piactl installed at $(which piactl)"
           echo "Logging into PIA..."
