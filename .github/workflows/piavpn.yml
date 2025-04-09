@@ -23,22 +23,27 @@ jobs:
           mkdir -p screenshots
           mkdir -p logs
 
-      - name: Run OpenVPN Connection with Direct DNS
+      - name: Run VPN and Puppeteer
         run: |
-          docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c "
+          docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined -v $(pwd):/workspace ubuntu:latest bash -c "
             set -e
             export DEBIAN_FRONTEND=noninteractive
+            cd /workspace
             
             echo 'Installing basic dependencies...'
             apt-get update
-            apt-get install -y wget unzip openvpn ca-certificates iproute2 curl iputils-ping traceroute dnsutils
-            
-            # Check initial network
-            echo 'Initial Network State:'
-            echo 'IP address:' \$(curl -s https://api.ipify.org)
-            echo 'DNS resolution:' \$(dig +short google.com)
-            echo 'Initial DNS server:'
-            cat /etc/resolv.conf
+            apt-get install -y wget unzip openvpn ca-certificates iproute2 curl dnsutils
+
+            echo 'Installing Node.js...'
+            apt-get install -y ca-certificates gnupg
+            mkdir -p /etc/apt/keyrings
+            curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+            echo 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main' > /etc/apt/sources.list.d/nodesource.list
+            apt-get update
+            apt-get install -y nodejs
+
+            echo 'Installing Puppeteer dependencies...'
+            apt-get install -y libx11-6 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 libnss3 libcups2 libxcursor1 libxvfb1 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libnotify4 libatspi2.0-0 libasound2
             
             echo 'Setting up OpenVPN connection to PIA...'
             mkdir -p /tmp/pia
@@ -51,22 +56,18 @@ jobs:
             echo '${{ secrets.PIA_PASSWORD }}' >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
-            # Create directory for logs
-            mkdir -p /tmp/logs
-            
             echo 'Configuring OpenVPN with explicit DNS settings...'
             SERVER_FILE=/tmp/pia/us_east.ovpn
             
             # Modify the config file
             sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
-            sed -i 's/verb 1/verb 4/' \$SERVER_FILE
             
             # Add DNS options
             echo 'dhcp-option DNS 8.8.8.8' >> \$SERVER_FILE
             echo 'dhcp-option DNS 8.8.4.4' >> \$SERVER_FILE
             
             echo 'Starting OpenVPN connection...'
-            openvpn --config \$SERVER_FILE --daemon --log /tmp/openvpn.log
+            openvpn --config \$SERVER_FILE --daemon --log /workspace/logs/openvpn.log
             
             echo 'Waiting for VPN interface to establish...'
             for i in \$(seq 1 12); do
@@ -74,61 +75,146 @@ jobs:
               if ip a | grep -q tun0; then
                 echo \"VPN interface detected!\"
                 ip a show tun0
-                echo \"VPN routing table:\"
-                ip route
                 
-                # Manually override DNS to ensure it works
-                echo \"Setting Google DNS directly...\"
+                # Manually set DNS
                 echo 'nameserver 8.8.8.8' > /etc/resolv.conf
                 echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
                 
-                echo \"Current DNS configuration:\"
-                cat /etc/resolv.conf
-                
-                # Test DNS
+                # Testing DNS resolution
                 echo \"Testing DNS resolution:\"
                 dig +short google.com
                 
-                # Test IP services
-                echo \"Testing IP services:\"
-                curl -s https://api.ipify.org
+                # Testing IP service
+                echo \"External IP:\"
+                EXTERNAL_IP=\$(curl -s https://api.ipify.org)
+                echo \$EXTERNAL_IP
                 
-                # Store logs
-                cp /tmp/openvpn.log /tmp/logs/
-                ip a > /tmp/logs/interfaces.log
-                ip route > /tmp/logs/routes.log
-                cat /etc/resolv.conf > /tmp/logs/resolv.conf
+                echo \"VPN connected successfully. Setting up Puppeteer...\"
+                cd /workspace
                 
-                # Make logs accessible
-                chmod -R 777 /tmp/logs
+                # Install Puppeteer
+                npm init -y
+                npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+                
+                # Create Puppeteer script
+                cat > rumble-visit.js << 'PUPPETEER_SCRIPT'
+                const puppeteer = require('puppeteer-extra');
+                const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+                const fs = require('fs');
+                
+                puppeteer.use(StealthPlugin());
+                
+                function sleep(ms) {
+                    return new Promise(resolve => setTimeout(resolve, ms));
+                }
+                
+                async function safeScreenshot(page, path) {
+                    try {
+                        await page.screenshot({ path });
+                        console.log(`Screenshot taken: ${path}`);
+                    } catch (err) {
+                        console.error(`Failed to take screenshot ${path}: ${err.message}`);
+                    }
+                }
+                
+                async function visitRumble(videoUrl) {
+                    console.log(`Launching browser to visit ${videoUrl}...`);
+                    const browser = await puppeteer.launch({
+                        headless: 'new',
+                        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+                    });
+                
+                    const page = await browser.newPage();
+                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
+                    await page.setCacheEnabled(false);
+                
+                    console.log('Navigating to Rumble video...');
+                    await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+                    await sleep(3000);
+                    await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
+                
+                    const playButtonSelectors = [
+                        '.bigPlayUIInner.ctp',
+                        'button[aria-label=\"Play\"]',
+                        '.vjs-big-play-button',
+                        '.icon-play',
+                        'div[class*=play]'
+                    ];
+                
+                    let playButton = null;
+                    for (const selector of playButtonSelectors) {
+                        playButton = await page.$(selector);
+                        if (playButton) {
+                            console.log(`Play button found using selector: ${selector}`);
+                            await playButton.click();
+                            await sleep(3000);
+                            await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
+                            break;
+                        }
+                    }
+                
+                    if (!playButton) {
+                        console.warn('Play button not found. Proceeding without clicking.');
+                    }
+                
+                    // Watch for 30 seconds
+                    for (let t = 5; t <= 30; t += 5) {
+                        await sleep(5000);
+                        await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
+                        
+                        // Check if video is playing
+                        const isPlaying = await page.evaluate(() => {
+                            const video = document.querySelector('video');
+                            return video && !video.paused && !video.ended && video.readyState > 2;
+                        });
+                
+                        console.log(`Video playing status at ${t}s: ${isPlaying}`);
+                    }
+                
+                    const finalHtml = await page.content();
+                    fs.writeFileSync(`./logs/final_page_${Date.now()}.html`, finalHtml);
+                    
+                    await browser.close();
+                    console.log('Visit completed successfully');
+                }
+                
+                async function main() {
+                    try {
+                        const videoUrl = process.argv[2] || 'https://rumble.com/v6r0vz6-automate.html';
+                        await visitRumble(videoUrl);
+                    } catch (error) {
+                        console.error('Error in script:', error);
+                        process.exit(1);
+                    }
+                }
+                
+                main();
+                PUPPETEER_SCRIPT
+                
+                # Run the Puppeteer script
+                VIDEO_URL='${{ github.event.inputs.video_url || 'https://rumble.com/v6r0vz6-automate.html' }}'
+                echo \"Visiting URL: \$VIDEO_URL\"
+                node rumble-visit.js \"\$VIDEO_URL\" | tee ./logs/puppeteer.log
+                
+                echo \"Script execution completed\"
                 break
               fi
               
               if [ \$i -eq 12 ]; then
                 echo \"VPN Connection Failed\"
-                cat /tmp/openvpn.log > /tmp/logs/openvpn.log
-                chmod -R 777 /tmp/logs
                 exit 1
-              fi
-              
-              # Display logs
-              if [ \$((i % 3)) -eq 0 ]; then
-                echo \"Current OpenVPN log:\"
-                tail -n 20 /tmp/openvpn.log
               fi
               
               sleep 5
             done
           "
-          
-          # Copy logs from Docker
-          docker cp $(docker ps -lq):/tmp/logs ./logs || echo "Failed to copy logs"
 
-      - name: Upload Diagnostic Information
+      - name: Upload Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vpn-diagnostics
+          name: rumble-visit-results
           path: |
+            screenshots/
             logs/
           retention-days: 7
