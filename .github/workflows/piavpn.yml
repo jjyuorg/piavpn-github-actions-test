@@ -18,12 +18,111 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Create Script Directory
+      - name: Create Required Directories
         run: |
           mkdir -p screenshots
           mkdir -p logs
+          chmod 777 screenshots logs
 
-      - name: Run VPN and Puppeteer
+      - name: Create Puppeteer Script
+        run: |
+          cat > rumble-visit.js << 'EOF'
+          const puppeteer = require('puppeteer-extra');
+          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+          const fs = require('fs');
+          
+          puppeteer.use(StealthPlugin());
+          
+          function sleep(ms) {
+              return new Promise(resolve => setTimeout(resolve, ms));
+          }
+          
+          async function safeScreenshot(page, path) {
+              try {
+                  await page.screenshot({ path });
+                  console.log(`Screenshot taken: ${path}`);
+              } catch (err) {
+                  console.error(`Failed to take screenshot ${path}: ${err.message}`);
+              }
+          }
+          
+          async function visitRumble(videoUrl) {
+              console.log(`Launching browser to visit ${videoUrl}...`);
+              const browser = await puppeteer.launch({
+                  headless: 'new',
+                  executablePath: '/usr/bin/chromium-browser',
+                  args: ['--no-sandbox', '--disable-setuid-sandbox'],
+              });
+          
+              const page = await browser.newPage();
+              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
+              await page.setCacheEnabled(false);
+          
+              console.log('Navigating to Rumble video...');
+              await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+              await sleep(3000);
+              await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
+          
+              const playButtonSelectors = [
+                  '.bigPlayUIInner.ctp',
+                  'button[aria-label="Play"]',
+                  '.vjs-big-play-button',
+                  '.icon-play',
+                  'div[class*=play]'
+              ];
+          
+              let playButton = null;
+              for (const selector of playButtonSelectors) {
+                  playButton = await page.$(selector);
+                  if (playButton) {
+                      console.log(`Play button found using selector: ${selector}`);
+                      await playButton.click();
+                      await sleep(3000);
+                      await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
+                      break;
+                  }
+              }
+          
+              if (!playButton) {
+                  console.warn('Play button not found. Proceeding without clicking.');
+              }
+          
+              // Watch for 30 seconds
+              for (let t = 5; t <= 30; t += 5) {
+                  await sleep(5000);
+                  await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
+                  
+                  // Check if video is playing
+                  const isPlaying = await page.evaluate(() => {
+                      const video = document.querySelector('video');
+                      return video && !video.paused && !video.ended && video.readyState > 2;
+                  });
+          
+                  console.log(`Video playing status at ${t}s: ${isPlaying}`);
+              }
+          
+              const finalHtml = await page.content();
+              fs.writeFileSync(`./logs/final_page_${Date.now()}.html`, finalHtml);
+              
+              await browser.close();
+              console.log('Visit completed successfully');
+          }
+          
+          async function main() {
+              try {
+                  const videoUrl = process.argv[2] || 'https://rumble.com/v6r0vz6-automate.html';
+                  await visitRumble(videoUrl);
+              } catch (error) {
+                  console.error('Error in script:', error);
+                  process.exit(1);
+              }
+          }
+          
+          main();
+          EOF
+          chmod 644 rumble-visit.js
+
+      - name: Run VPN Setup
         run: |
           docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined -v $(pwd):/workspace ubuntu:latest bash -c "
             set -e
@@ -33,17 +132,6 @@ jobs:
             echo 'Installing basic dependencies...'
             apt-get update
             apt-get install -y wget unzip openvpn ca-certificates iproute2 curl dnsutils
-
-            echo 'Installing Node.js...'
-            apt-get install -y ca-certificates gnupg
-            mkdir -p /etc/apt/keyrings
-            curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-            echo 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main' > /etc/apt/sources.list.d/nodesource.list
-            apt-get update
-            apt-get install -y nodejs
-
-            echo 'Installing Chromium for Puppeteer...'
-            apt-get install -y chromium-browser
             
             echo 'Setting up OpenVPN connection to PIA...'
             mkdir -p /tmp/pia
@@ -58,11 +146,7 @@ jobs:
             
             echo 'Configuring OpenVPN with explicit DNS settings...'
             SERVER_FILE=/tmp/pia/us_east.ovpn
-            
-            # Modify the config file
             sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
-            
-            # Add DNS options
             echo 'dhcp-option DNS 8.8.8.8' >> \$SERVER_FILE
             echo 'dhcp-option DNS 8.8.4.4' >> \$SERVER_FILE
             
@@ -87,122 +171,87 @@ jobs:
                 # Testing IP service
                 echo \"External IP:\"
                 EXTERNAL_IP=\$(curl -s https://api.ipify.org)
-                echo \$EXTERNAL_IP
+                echo \$EXTERNAL_IP > /workspace/logs/vpn_ip.txt
+                echo \"VPN connected successfully!\"
+                chmod -R 777 /workspace/logs
+                exit 0
+              fi
+              
+              if [ \$i -eq 12 ]; then
+                echo \"VPN Connection Failed\"
+                cat /tmp/openvpn.log > /workspace/logs/openvpn_failure.log
+                chmod -R 777 /workspace/logs
+                exit 1
+              fi
+              
+              sleep 5
+            done
+          "
+
+      - name: Run Puppeteer through VPN
+        run: |
+          docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined -v $(pwd):/workspace ubuntu:latest bash -c "
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            cd /workspace
+            
+            echo 'Installing Node.js and Chromium...'
+            apt-get update
+            apt-get install -y ca-certificates gnupg
+            mkdir -p /etc/apt/keyrings
+            curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+            echo 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main' > /etc/apt/sources.list.d/nodesource.list
+            apt-get update
+            apt-get install -y nodejs chromium-browser
+            
+            echo 'Setting up OpenVPN connection to PIA...'
+            mkdir -p /tmp/pia
+            cd /tmp/pia
+            wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
+            unzip -q openvpn.zip
+            
+            echo 'Creating credentials file...'
+            echo '${{ secrets.PIA_USERNAME }}' > /tmp/pia/auth.txt
+            echo '${{ secrets.PIA_PASSWORD }}' >> /tmp/pia/auth.txt
+            chmod 600 /tmp/pia/auth.txt
+            
+            echo 'Configuring OpenVPN with explicit DNS settings...'
+            SERVER_FILE=/tmp/pia/us_east.ovpn
+            sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' \$SERVER_FILE
+            echo 'dhcp-option DNS 8.8.8.8' >> \$SERVER_FILE
+            echo 'dhcp-option DNS 8.8.4.4' >> \$SERVER_FILE
+            
+            echo 'Starting OpenVPN connection...'
+            openvpn --config \$SERVER_FILE --daemon --log /workspace/logs/puppeteer_vpn.log
+            
+            echo 'Waiting for VPN interface to establish...'
+            for i in \$(seq 1 12); do
+              echo \"Checking for VPN interface (attempt \$i)...\"
+              if ip a | grep -q tun0; then
+                echo \"VPN interface detected!\"
                 
-                echo \"VPN connected successfully. Setting up Puppeteer...\"
+                # Manually set DNS
+                echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+                echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
+                
+                # Setup and run Puppeteer
                 cd /workspace
-                
-                # Install Puppeteer with Chromium option
                 npm init -y
                 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
-                
-                # Create Puppeteer script
-                cat > rumble-visit.js << 'PUPPETEER_SCRIPT'
-                const puppeteer = require('puppeteer-extra');
-                const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-                const fs = require('fs');
-                
-                puppeteer.use(StealthPlugin());
-                
-                function sleep(ms) {
-                    return new Promise(resolve => setTimeout(resolve, ms));
-                }
-                
-                async function safeScreenshot(page, path) {
-                    try {
-                        await page.screenshot({ path });
-                        console.log(`Screenshot taken: ${path}`);
-                    } catch (err) {
-                        console.error(`Failed to take screenshot ${path}: ${err.message}`);
-                    }
-                }
-                
-                async function visitRumble(videoUrl) {
-                    console.log(`Launching browser to visit ${videoUrl}...`);
-                    const browser = await puppeteer.launch({
-                        headless: 'new',
-                        executablePath: '/usr/bin/chromium-browser',
-                        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-                    });
-                
-                    const page = await browser.newPage();
-                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
-                    await page.setCacheEnabled(false);
-                
-                    console.log('Navigating to Rumble video...');
-                    await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-                    await sleep(3000);
-                    await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
-                
-                    const playButtonSelectors = [
-                        '.bigPlayUIInner.ctp',
-                        'button[aria-label=\"Play\"]',
-                        '.vjs-big-play-button',
-                        '.icon-play',
-                        'div[class*=play]'
-                    ];
-                
-                    let playButton = null;
-                    for (const selector of playButtonSelectors) {
-                        playButton = await page.$(selector);
-                        if (playButton) {
-                            console.log(`Play button found using selector: ${selector}`);
-                            await playButton.click();
-                            await sleep(3000);
-                            await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
-                            break;
-                        }
-                    }
-                
-                    if (!playButton) {
-                        console.warn('Play button not found. Proceeding without clicking.');
-                    }
-                
-                    // Watch for 30 seconds
-                    for (let t = 5; t <= 30; t += 5) {
-                        await sleep(5000);
-                        await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
-                        
-                        // Check if video is playing
-                        const isPlaying = await page.evaluate(() => {
-                            const video = document.querySelector('video');
-                            return video && !video.paused && !video.ended && video.readyState > 2;
-                        });
-                
-                        console.log(`Video playing status at ${t}s: ${isPlaying}`);
-                    }
-                
-                    const finalHtml = await page.content();
-                    fs.writeFileSync(`./logs/final_page_${Date.now()}.html`, finalHtml);
-                    
-                    await browser.close();
-                    console.log('Visit completed successfully');
-                }
-                
-                async function main() {
-                    try {
-                        const videoUrl = process.argv[2] || 'https://rumble.com/v6r0vz6-automate.html';
-                        await visitRumble(videoUrl);
-                    } catch (error) {
-                        console.error('Error in script:', error);
-                        process.exit(1);
-                    }
-                }
-                
-                main();
-                PUPPETEER_SCRIPT
                 
                 # Run the Puppeteer script
                 VIDEO_URL='${{ github.event.inputs.video_url || 'https://rumble.com/v6r0vz6-automate.html' }}'
                 echo \"Visiting URL: \$VIDEO_URL\"
                 node rumble-visit.js \"\$VIDEO_URL\" | tee ./logs/puppeteer.log
                 
-                echo \"Script execution completed\"
-                break
+                chmod -R 777 /workspace/screenshots
+                chmod -R 777 /workspace/logs
+                echo \"Puppeteer execution completed\"
+                exit 0
               fi
               
               if [ \$i -eq 12 ]; then
-                echo \"VPN Connection Failed\"
+                echo \"VPN Connection Failed for Puppeteer\"
                 exit 1
               fi
               
@@ -216,6 +265,6 @@ jobs:
         with:
           name: rumble-visit-results
           path: |
-            screenshots/
-            logs/
+            screenshots/*
+            logs/*
           retention-days: 7
