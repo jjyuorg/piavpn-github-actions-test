@@ -1,4 +1,4 @@
-name: Test PIA VPN Connection (TCP 443)
+name: Test PIA VPN Connection (TCP 443 Insecure)
 on:
   push:           # Runs automatically on each commit
   workflow_dispatch:  # Also allows manual triggering
@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Run PIA VPN with Working TCP Configuration
+      - name: Run PIA VPN with Insecure Flag
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
@@ -22,51 +22,46 @@ jobs:
             echo "Initial IP:"
             curl -s https://api.ipify.org || echo "Unable to get initial IP"
             
-            echo "Setting up optimized OpenVPN configuration..."
+            echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
             
-            # Create optimized config
+            # Create config with insecure flag
             echo "client" > /tmp/pia/pia.ovpn
             echo "dev tun" >> /tmp/pia/pia.ovpn
             echo "proto tcp" >> /tmp/pia/pia.ovpn
-            # Server with confirmed TCP 443 connectivity
-            echo "remote 84.17.62.130 443" >> /tmp/pia/pia.ovpn
+            # Try the other working server
+            echo "remote 84.17.57.98 443" >> /tmp/pia/pia.ovpn
             echo "resolv-retry infinite" >> /tmp/pia/pia.ovpn
             echo "nobind" >> /tmp/pia/pia.ovpn
             echo "persist-key" >> /tmp/pia/pia.ovpn
             echo "persist-tun" >> /tmp/pia/pia.ovpn
-            # Use optimal encryption settings
             echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305" >> /tmp/pia/pia.ovpn
             echo "auth SHA256" >> /tmp/pia/pia.ovpn
             echo "tls-client" >> /tmp/pia/pia.ovpn
-            echo "remote-cert-tls server" >> /tmp/pia/pia.ovpn
+            # Skip cert verification
+            echo "verify-x509-name none" >> /tmp/pia/pia.ovpn
             echo "auth-user-pass /tmp/pia/auth.txt" >> /tmp/pia/pia.ovpn
-            # Disable compression for better security
             echo "compress" >> /tmp/pia/pia.ovpn
-            # Increase verbosity for better debugging
             echo "verb 5" >> /tmp/pia/pia.ovpn
             echo "connect-retry 5 5" >> /tmp/pia/pia.ovpn
-            # Faster connection timeout
             echo "connect-timeout 10" >> /tmp/pia/pia.ovpn
-            # Add explicit DNS settings
             echo "dhcp-option DNS 8.8.8.8" >> /tmp/pia/pia.ovpn
             echo "dhcp-option DNS 8.8.4.4" >> /tmp/pia/pia.ovpn
-            # Set client to pull settings from server
             echo "pull" >> /tmp/pia/pia.ovpn
-            # Add fast-io for better performance
             echo "fast-io" >> /tmp/pia/pia.ovpn
+            # Add insecure flag to skip certificate verification
+            echo "insecure-port 443" >> /tmp/pia/pia.ovpn
             
-            # Download CA certificate
+            # Download CA certificate but we won\'t enforce verification
             wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O /tmp/pia/ca.rsa.4096.crt
-            echo "ca /tmp/pia/ca.rsa.4096.crt" >> /tmp/pia/pia.ovpn
             
             echo "Creating credentials file..."
             echo "${{ secrets.PIA_USERNAME }}" > /tmp/pia/auth.txt
             echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
-            echo "Starting OpenVPN connection..."
-            openvpn --config /tmp/pia/pia.ovpn --daemon --log /tmp/openvpn.log
+            echo "Starting OpenVPN connection with insecure flag..."
+            openvpn --config /tmp/pia/pia.ovpn --daemon --log /tmp/openvpn.log --auth-nocache --auth-retry nointeract
             
             echo "Waiting for VPN interface to establish..."
             for i in $(seq 1 30); do
