@@ -15,7 +15,7 @@ jobs:
   rumble-vpn:
     runs-on: ubuntu-latest
     
-    # Run inside an ubuntu:latest container with privileges so we can manage tun0
+    # Run inside an ubuntu:latest container with privileges so we can create tun0
     container:
       image: ubuntu:latest
       options: --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
@@ -26,13 +26,13 @@ jobs:
 
       - name: Install Basic Dependencies
         run: |
-          # Avoid interactive prompts
+          # Avoid interactive prompts (Debconf)
           export DEBIAN_FRONTEND=noninteractive
 
           apt-get update
           apt-get install -y wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg
 
-          # The shared libraries that Puppeteer's Chromium needs
+          # Puppeteer shared libs except for ALSA (we'll handle that below)
           apt-get install -y \
             fonts-liberation \
             libatk-bridge2.0-0 \
@@ -57,13 +57,15 @@ jobs:
             libxrender1 \
             libxss1 \
             libxtst6 \
-            # NOTE: no libasound2 -> use libasound2t64 on newer Ubuntu
-            libasound2t64 \
-            libasound2-plugins \
             libpulse0 \
             libxkbcommon0 \
             xdg-utils \
             lsb-release
+
+          # Fallback approach for ALSA libraries
+          apt-get install -y libasound2 libasound2-plugins || \
+          apt-get install -y libasound2t64 libasound2-plugins || \
+          echo "Warning: no ALSA package was installed."
 
           # Install Node.js 20.x
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
@@ -87,7 +89,7 @@ jobs:
           chmod 600 auth.txt
 
           echo "Updating .ovpn configuration for DNS and credentials..."
-          SERVER_FILE=/tmp/pia/us_east.ovpn
+          SERVER_FILE=us_east.ovpn
           sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' $SERVER_FILE
           echo 'dhcp-option DNS 8.8.8.8' >> $SERVER_FILE
           echo 'dhcp-option DNS 8.8.4.4' >> $SERVER_FILE
@@ -117,7 +119,7 @@ jobs:
       - name: Install Puppeteer
         run: |
           npm init -y
-          # "puppeteer" includes a bundled Chromium.
+          # Puppeteer includes a bundled Chromium (no Snap needed).
           npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
           mkdir -p scripts screenshots logs
 
