@@ -18,17 +18,9 @@ jobs:
             echo "Installing base dependencies..."
             apt update && apt install -y --no-install-recommends curl wget sudo iproute2 apt-transport-https gnupg ca-certificates openvpn unzip
             
-            echo "Downloading and installing PIA OpenVPN client..."
-            cd /tmp
-            curl -sSL https://www.privateinternetaccess.com/installer/x-installer-latest.sh -o pia-installer.sh
-            chmod +x pia-installer.sh
-            ./pia-installer.sh --unattended
-            
-            echo "Setting up PIA connection..."
+            echo "Downloading PIA OpenVPN configurations..."
             mkdir -p /etc/openvpn/pia
             cd /etc/openvpn/pia
-            
-            echo "Downloading PIA OpenVPN configurations..."
             wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
             unzip -o openvpn.zip
             
