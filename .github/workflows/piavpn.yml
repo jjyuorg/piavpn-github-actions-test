@@ -27,7 +27,7 @@ jobs:
           apt install -y curl wget sudo iproute2 apt-transport-https gnupg ca-certificates
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
           apt install -y nodejs
-          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxshmfence1 libxss1 libasound2-t64 libpulse0 libxkbcommon0 xdg-utils lsb-release libasound2-plugins
+          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxshmfence1 libxss1 libasound2t64 libpulse0 libxkbcommon0 xdg-utils lsb-release libasound2-plugins
 
       - name: Install and Connect PIA
         env:
@@ -35,12 +35,10 @@ jobs:
           PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
         run: |
           echo "Downloading PIA client..."
-          # Download the official Linux installer (.run file); change the version if needed.
+          # Download the official Linux installer (.run file)
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           sudo chmod +x pia.run
           echo "Installing PIA client in CLI mode..."
-          # Run the installer in CLI mode.
-          # If a non-interactive flag is supported (e.g. --cli or --silent), you may add it here.
           sh pia.run --cli || true
           # Verify that piactl is installed.
           which piactl || { echo "piactl not found. Exiting."; exit 1; }
