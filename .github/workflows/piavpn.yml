@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     
     container:
-      # Run inside an ubuntu:latest container with privileges so we can manage tun0
+      # Run inside an ubuntu:latest container with privileges so we can create tun0
       image: ubuntu:latest
       options: --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
 
@@ -28,7 +28,8 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg psmisc
+          # Install sudo so we can run "sudo killall openvpn", etc.
+          apt-get install -y sudo wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg psmisc
           
           # Puppeteer shared libraries (but skip ALSA here; we'll do fallback next)
           apt-get install -y \
@@ -93,7 +94,7 @@ jobs:
           echo 'dhcp-option DNS 8.8.4.4' >> $SERVER_FILE
 
           echo "Starting OpenVPN in the background..."
-          openvpn --config $SERVER_FILE --daemon --log /workspace/openvpn.log
+          sudo openvpn --config $SERVER_FILE --daemon --log /workspace/openvpn.log
 
           echo "Waiting for VPN interface (tun0)..."
           for i in $(seq 1 12); do
