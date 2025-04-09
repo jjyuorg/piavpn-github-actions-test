@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     
     container:
-      # Privileged container so we can create tun0
+      # Run inside an ubuntu:latest container with privileges so we can manage tun0
       image: ubuntu:latest
       options: --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
 
@@ -30,7 +30,7 @@ jobs:
           apt-get update
           apt-get install -y wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg psmisc
           
-          # Puppeteer shared libraries (but skip ALSA; we'll do fallback next)
+          # Puppeteer shared libraries (but skip ALSA here; we'll do fallback next)
           apt-get install -y \
             fonts-liberation \
             libatk-bridge2.0-0 \
@@ -92,7 +92,7 @@ jobs:
           echo 'dhcp-option DNS 8.8.8.8' >> $SERVER_FILE
           echo 'dhcp-option DNS 8.8.4.4' >> $SERVER_FILE
 
-          echo "Starting OpenVPN in background..."
+          echo "Starting OpenVPN in the background..."
           openvpn --config $SERVER_FILE --daemon --log /workspace/openvpn.log
 
           echo "Waiting for VPN interface (tun0)..."
@@ -100,7 +100,7 @@ jobs:
             echo "Attempt $i..."
             if ip a | grep -q tun0; then
               echo "VPN interface detected!"
-              # Override DNS
+              # Override DNS resolvers
               echo 'nameserver 8.8.8.8' > /etc/resolv.conf
               echo 'nameserver 8.8.4.4' >> /etc/resolv.conf
               break
@@ -138,9 +138,9 @@ jobs:
           async function safeScreenshot(page, filename) {
             try {
               await page.screenshot({ path: filename });
-              console.log(\`Screenshot taken: \${filename}\`);
+              console.log(`Screenshot taken: ${filename}`);
             } catch (err) {
-              console.error(\`Failed to take screenshot \${filename}: \${err.message}\`);
+              console.error(`Failed to take screenshot ${filename}: ${err.message}`);
             }
           }
 
@@ -158,24 +158,24 @@ jobs:
               const piaDir = '/tmp/pia';
               const ovpnFiles = fs.readdirSync(piaDir).filter(f => f.endsWith('.ovpn'));
               if (ovpnFiles.length === 0) {
-                throw new Error(\`No .ovpn files found in \${piaDir}\`);
+                throw new Error(`No .ovpn files found in ${piaDir}`);
               }
 
               const randomIndex = Math.floor(Math.random() * ovpnFiles.length);
               const chosenOvpn = ovpnFiles[randomIndex];
               const chosenPath = path.join(piaDir, chosenOvpn);
-              console.log(\`Randomly selected server config: \${chosenPath}\`);
+              console.log(`Randomly selected server config: ${chosenPath}`);
 
               // Ensure 'auth-user-pass /tmp/pia/auth.txt' is present
               let contents = fs.readFileSync(chosenPath, 'utf8');
               if (!contents.includes('auth-user-pass /tmp/pia/auth.txt')) {
                 contents = contents.replace('auth-user-pass', 'auth-user-pass /tmp/pia/auth.txt');
-                contents += '\\ndhcp-option DNS 8.8.8.8\\ndhcp-option DNS 8.8.4.4\\n';
+                contents += '\ndhcp-option DNS 8.8.8.8\ndhcp-option DNS 8.8.4.4\n';
                 fs.writeFileSync(chosenPath, contents, 'utf8');
               }
 
               // Start openvpn in the background
-              execSync(\`sudo openvpn --config "\${chosenPath}" --daemon --log /workspace/openvpn_reconnect.log\`, { stdio: 'inherit' });
+              execSync(`sudo openvpn --config "${chosenPath}" --daemon --log /workspace/openvpn_reconnect.log`, { stdio: 'inherit' });
 
               // Wait for tun0
               let i = 0;
@@ -199,7 +199,7 @@ jobs:
 
               // Print new IP
               const newIP = execSync('curl -s https://api.ipify.org').toString().trim();
-              console.log(\`New VPN IP: \${newIP}\`);
+              console.log(`New VPN IP: ${newIP}`);
               return true;
             } catch (err) {
               console.error('Failed to reconnect VPN:', err.message);
@@ -208,7 +208,7 @@ jobs:
           }
 
           async function visitRumble(videoUrl, attempt = 1) {
-            console.log(\`[Attempt #\${attempt}] Launching browser to visit \${videoUrl}...\`);
+            console.log(`[Attempt #${attempt}] Launching browser to visit ${videoUrl}...`);
             const browser = await puppeteer.launch({
               headless: 'new',
               executablePath: require('puppeteer').executablePath(),
@@ -225,7 +225,7 @@ jobs:
               console.log('Navigating to Rumble video...');
               await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
               await sleep(3000);
-              await safeScreenshot(page, \`./screenshots/rumble_landing_\${Date.now()}.png\`);
+              await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
 
               const playButtonSelectors = [
                 '.bigPlayUIInner.ctp',
@@ -239,10 +239,10 @@ jobs:
               for (const selector of playButtonSelectors) {
                 playButton = await page.$(selector);
                 if (playButton) {
-                  console.log(\`Play button found using selector: \${selector}\`);
+                  console.log(`Play button found using selector: ${selector}`);
                   await playButton.click();
                   await sleep(3000);
-                  await safeScreenshot(page, \`./screenshots/rumble_play_clicked_\${Date.now()}.png\`);
+                  await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
                   break;
                 }
               }
@@ -254,14 +254,13 @@ jobs:
               // Watch for 30s, checking every 5s
               for (let t = 5; t <= 30; t += 5) {
                 await sleep(5000);
-                await safeScreenshot(page, \`./screenshots/rumble_watch_\${t}s_\${Date.now()}.png\`);
+                await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
 
-                // Check if video is playing
                 const isPlaying = await page.evaluate(() => {
                   const video = document.querySelector('video');
                   return video && !video.paused && !video.ended && video.readyState > 2;
                 });
-                console.log(\`Video playing status at \${t}s: \${isPlaying}\`);
+                console.log(`Video playing status at ${t}s: ${isPlaying}`);
 
                 // If not playing, reconnect + retry (up to 3 attempts)
                 if (!isPlaying) {
@@ -281,7 +280,7 @@ jobs:
 
               // Save final HTML
               const finalHtml = await page.content();
-              fs.writeFileSync(\`./logs/final_page_\${Date.now()}.html\`, finalHtml);
+              fs.writeFileSync(`./logs/final_page_${Date.now()}.html`, finalHtml);
               console.log('Visit completed successfully');
             } catch (err) {
               console.error('Error in visit:', err.message);
