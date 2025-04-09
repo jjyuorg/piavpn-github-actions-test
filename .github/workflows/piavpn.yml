@@ -16,7 +16,7 @@ jobs:
             set -e
             export DEBIAN_FRONTEND=noninteractive
             echo "Installing dependencies..."
-            apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates
+            apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2
             
             echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
