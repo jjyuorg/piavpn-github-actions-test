@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ubuntu:24.04
-      # Enable systemd by mounting /run, /run/lock, and /sys/fs/cgroup and set the entrypoint to /sbin/init.
+      # Enable systemd by mounting /run, /run/lock, and /sys/fs/cgroup; set the entrypoint.
       options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro --entrypoint /sbin/init
     steps:
       - name: Checkout Repository
@@ -39,35 +39,40 @@ jobs:
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           chmod +x pia.run
 
-          # Start system dbus to support any systemd calls by the installer.
+          # Start system D-Bus so installer’s systemd calls have a bus to connect to.
           echo "Starting system dbus daemon..."
           sudo dbus-daemon --system --fork
 
-          # Create non-root user 'piauser' if not present.
+          # Create non-root user 'piauser' if not already present.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
 
-          # Configure passwordless sudo for piauser to avoid sudo prompts inside the installer.
+          # Set up passwordless sudo for piauser.
           echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
 
           echo "Running PIA installer as piauser..."
-          # Run the installer with --accept and --nox11. We ignore its nonzero exit code.
+          # Run the installer as piauser (without --noexec so that it extracts files)
           su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
 
           echo "Listing extracted files for debugging:"
           ls -R /home/piauser
 
-          # Search both /home/piauser and /opt/piavpn for the piactl binary (case-insensitive).
+          # Search for piactl (case-insensitive) in both /home/piauser and /opt/piavpn.
           PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
             echo "piactl not found after installation. Exiting."
             exit 1
           fi
           echo "piactl found at: $PIACTL_PATH"
-          sudo cp "$PIACTL_PATH" /usr/local/bin/
+          # Only copy if the real paths differ.
+          if [ "$(realpath "$PIACTL_PATH")" != "$(realpath /usr/local/bin/piactl)" ]; then
+            sudo cp "$PIACTL_PATH" /usr/local/bin/
+            echo "piactl copied to /usr/local/bin."
+          else
+            echo "piactl is already in /usr/local/bin."
+          fi
           echo "piactl installed at $(which piactl)"
-
           echo "Logging into PIA..."
           sudo piactl login "$PIA_USERNAME" "$PIA_PASSWORD"
           echo "Connecting to PIA..."
