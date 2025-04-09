@@ -32,57 +32,45 @@ jobs:
             ls -la  # List the available configuration files
             
             echo "Creating credentials file..."
-            cat > /tmp/pia/auth.txt << EOF
-            ${{ secrets.PIA_USERNAME }}
-            ${{ secrets.PIA_PASSWORD }}
-            EOF
+            echo "${{ secrets.PIA_USERNAME }}" > /tmp/pia/auth.txt
+            echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
             chmod 600 /tmp/pia/auth.txt
             
             echo "Starting OpenVPN connection using official PIA configuration..."
-            # Choose a US server as example
-            OVPN_CONFIG="/tmp/pia/us_california.ovpn"
+            # Choose a US server as example - use a server that is likely to work well
+            OVPN_CONFIG="/tmp/pia/us_east.ovpn"
             
             # Modify the auth-user-pass line to point to our auth file
             sed -i "s/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/" $OVPN_CONFIG
             
-            # Start OpenVPN
+            # Start OpenVPN in the foreground to see logs directly
+            echo "Starting OpenVPN with server configuration - this may take a minute..."
             openvpn --config $OVPN_CONFIG --daemon --log /tmp/openvpn.log
             
+            # Wait for connection
             echo "Waiting for VPN interface to establish..."
-            # Sleep first to give OpenVPN time to start
-            sleep 10
-            
-            # Check if OpenVPN is still running
-            if ! pgrep -x openvpn > /dev/null; then
-              echo "OpenVPN process died. Checking logs:"
-              cat /tmp/openvpn.log
-              exit 1
-            fi
-            
-            # Now check for interface
-            for i in $(seq 1 15); do
+            for i in $(seq 1 20); do
               echo "Checking for VPN interface (attempt $i)..."
               if ip a | grep -q tun0; then
                 echo "VPN interface detected!"
                 ip a show tun0
-                # Check if we have a new IP
+                echo "Checking routes:"
+                ip route
                 echo "New IP after VPN connection:"
                 curl -s https://api.ipify.org || echo "Unable to get new IP"
                 echo "VPN connection successful!"
                 exit 0
               fi
               
-              # Show logs every attempt
-              echo "Current OpenVPN log (attempt $i):"
+              # Show logs
               if [ -f /tmp/openvpn.log ]; then
-                tail -n 20 /tmp/openvpn.log
-              else
-                echo "Log file does not exist yet"
+                echo "Current OpenVPN log (attempt $i):"
+                tail -n 10 /tmp/openvpn.log
               fi
               
-              # Check if OpenVPN is still running
+              # Check if process is still running
               if ! pgrep -x openvpn > /dev/null; then
-                echo "OpenVPN process died. Checking logs:"
+                echo "OpenVPN process died. Full logs:"
                 cat /tmp/openvpn.log
                 exit 1
               fi
@@ -90,20 +78,9 @@ jobs:
               sleep 5
             done
             
-            echo "VPN connection timed out."
-            if [ -f /tmp/openvpn.log ]; then
-              echo "Full OpenVPN logs:"
-              cat /tmp/openvpn.log
-            else
-              echo "No OpenVPN log file found."
-            fi
-            
-            # See if OpenVPN is still running
-            if pgrep -x openvpn > /dev/null; then
-              echo "OpenVPN process is still running but no interface was created."
-              pkill openvpn
-            fi
-            
+            # If we get here, connection timed out
+            echo "VPN connection timed out after multiple attempts."
+            cat /tmp/openvpn.log
             exit 1
           '
           exit_code=$?
