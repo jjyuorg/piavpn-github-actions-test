@@ -8,82 +8,72 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Run PIA VPN using alternative port
+      - name: Run PIA VPN with direct OpenVPN approach
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
           docker run --rm --privileged --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c '
             set -e
             export DEBIAN_FRONTEND=noninteractive
-            echo "Installing base dependencies..."
-            apt update && apt install -y --no-install-recommends curl wget sudo iproute2 apt-transport-https gnupg ca-certificates openvpn unzip net-tools iputils-ping dnsutils
+            echo "Installing minimal dependencies..."
+            apt update && apt install -y --no-install-recommends openvpn curl wget unzip
             
-            echo "Downloading PIA OpenVPN configurations..."
-            mkdir -p /etc/openvpn/pia
-            cd /etc/openvpn/pia
-            wget -q https://www.privateinternetaccess.com/openvpn/openvpn.zip
-            unzip -o openvpn.zip
+            echo "Initial network test..."
+            echo "Initial public IP: $(curl -s https://api.ipify.org)"
+            
+            echo "Setting up minimal PIA connection..."
+            mkdir -p /tmp/pia
+            cd /tmp/pia
+            
+            # Download only one specific OpenVPN config rather than the whole zip
+            wget -q https://www.privateinternetaccess.com/openvpn/ca_montreal.ovpn
             
             echo "Creating credentials file..."
-            echo "${{ secrets.PIA_USERNAME }}" > /etc/openvpn/pia/auth.txt
-            echo "${{ secrets.PIA_PASSWORD }}" >> /etc/openvpn/pia/auth.txt
-            chmod 600 /etc/openvpn/pia/auth.txt
+            echo "${{ secrets.PIA_USERNAME }}" > /tmp/pia/auth.txt
+            echo "${{ secrets.PIA_PASSWORD }}" >> /tmp/pia/auth.txt
+            chmod 600 /tmp/pia/auth.txt
             
-            # Try a different server and port (port 443 is often allowed through firewalls)
             echo "Modifying OpenVPN config to use port 443..."
-            # Copy the configuration file
-            cp /etc/openvpn/pia/us_east.ovpn /etc/openvpn/pia/custom.ovpn
+            sed -i "s/remote ca-montreal.privateinternetaccess.com 1198 udp/remote ca-montreal.privateinternetaccess.com 443 tcp/" /tmp/pia/ca_montreal.ovpn
             
-            # Modify the config to use TCP port 443 (commonly allowed)
-            sed -i "s/remote.*1198 udp/remote 104.200.151.57 443 tcp/" /etc/openvpn/pia/custom.ovpn
+            # Add explicit DNS settings to improve reliability
+            echo "Adding explicit DNS config..."
+            echo "dhcp-option DNS 8.8.8.8" >> /tmp/pia/ca_montreal.ovpn
+            echo "dhcp-option DNS 8.8.4.4" >> /tmp/pia/ca_montreal.ovpn
             
-            echo "Starting OpenVPN connection with modified configuration..."
-            sudo openvpn --config /etc/openvpn/pia/custom.ovpn --auth-user-pass /etc/openvpn/pia/auth.txt --daemon --log /var/log/openvpn.log --verb 4
+            echo "Starting OpenVPN in the background..."
+            openvpn --config /tmp/pia/ca_montreal.ovpn --auth-user-pass /tmp/pia/auth.txt --daemon --log /tmp/openvpn.log --verb 3
             
-            echo "Waiting for connection to establish..."
-            for i in $(seq 1 30); do
-              echo "Checking connection attempt $i..."
+            echo "Waiting for VPN connection to establish..."
+            counter=0
+            while [ $counter -lt 15 ]; do
               if ip a | grep -q tun0; then
                 echo "VPN interface detected!"
                 break
               fi
+              echo "Waiting for VPN connection... ($counter/15)"
               sleep 2
-              
-              # Check OpenVPN logs periodically
-              if [ $((i % 5)) -eq 0 ]; then
-                echo "Current OpenVPN log:"
-                tail -n 20 /var/log/openvpn.log
-              fi
+              counter=$((counter + 1))
             done
             
-            # Check if VPN interface exists
-            if ! ip a | grep -q tun0; then
-              echo "VPN interface not found after waiting. Showing logs:"
-              cat /var/log/openvpn.log
-              echo "Network interfaces:"
-              ip a
+            # Show logs if we have the interface but check if we can actually route traffic
+            if ip a | grep -q tun0; then
+              echo "VPN interface is present, testing connection..."
+              new_ip=$(curl -s --max-time 10 https://api.ipify.org)
+              if [ ! -z "$new_ip" ]; then
+                echo "Connection successful! New IP: $new_ip"
+                exit 0
+              else
+                echo "VPN interface exists but cannot reach the internet."
+                cat /tmp/openvpn.log
+                exit 1
+              fi
+            else
+              echo "Failed to establish VPN connection. Logs:"
+              cat /tmp/openvpn.log
               exit 1
             fi
-            
-            echo "Testing connection..."
-            echo "Current public IP: $(curl -s https://api64.ipify.org)"
-            
-            # Check if we can get the IP
-            current_ip=$(curl -s https://api64.ipify.org)
-            if [[ -z "$current_ip" ]]; then
-              echo "Failed to get current IP. Connection may have failed."
-              echo "Full OpenVPN logs:"
-              cat /var/log/openvpn.log
-              exit 1
-            fi
-            
-            echo "VPN connection successful with IP: $current_ip"
           '
-          rc=$?
-          echo "Docker run exit code: $rc"
-          if [ $rc -eq 125 ]; then
-            echo "Ignoring exit code 125 from Docker cleanup error."
-            exit 0
-          else
-            exit $rc
-          fi
+          exit_code=$?
+          echo "Docker run exit code: $exit_code"
+          exit $exit_code
