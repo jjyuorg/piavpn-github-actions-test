@@ -16,11 +16,20 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ubuntu:24.04
-      # These options enable systemd by using privileged mode, mounting /run and /run/lock as tmpfs, and mounting cgroup
+      # Attempt to enable systemd by using privileged mode, tmpfs mounts, cgroup bind, and setting the entrypoint.
       options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro --entrypoint /sbin/init
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Check systemd and D-Bus status
+        run: |
+          echo "Systemd version:"
+          systemctl --version || true
+          echo "Systemd status:"
+          systemctl status || true
+          echo "D-Bus List Names:"
+          dbus-send --system --dest=org.freedesktop.DBus --print-reply / org.freedesktop.DBus.ListNames || true
 
       - name: Install Essential Dependencies
         run: |
@@ -28,10 +37,7 @@ jobs:
           apt install -y curl wget sudo iproute2 apt-transport-https gnupg ca-certificates
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
           apt install -y nodejs
-          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 \
-            libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
-            libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxshmfence1 libxss1 \
-            libasound2t64 libpulse0 libxkbcommon0 xdg-utils lsb-release libasound2-plugins
+          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxshmfence1 libxss1 libasound2t64 libpulse0 libxkbcommon0 xdg-utils lsb-release libasound2-plugins
 
       - name: Install and Connect PIA
         env:
@@ -43,22 +49,19 @@ jobs:
           chmod +x pia.run
 
           echo "Starting system dbus daemon..."
-          sudo dbus-daemon --system --fork
+          sudo dbus-daemon --system --fork || true
 
-          # Create a non-root user "piauser" if it doesn't already exist.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
           echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
 
           echo "Running PIA installer as piauser..."
-          # Run the installer as piauser; ignore non-zero exit (systemd parts may fail)
           su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
 
           echo "Listing extracted files for debugging:"
           ls -R /home/piauser
-
-          # Search for piactl (case-insensitive) in both /home/piauser and /opt/piavpn
+          
           PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
             echo "piactl not found after installation. Exiting."
@@ -73,13 +76,12 @@ jobs:
           fi
           echo "piactl installed at $(which piactl)"
 
-          echo "Logging into PIA (verbose, timeout increased to 90 sec)..."
-          # Write credentials to a temporary file: username on first line, password on second
+          echo "Logging into PIA (verbose, timeout 90 sec)..."
           echo -e "${PIA_USERNAME}\n${PIA_PASSWORD}" > pia_credentials.txt
           sudo piactl login --timeout 90 --debug pia_credentials.txt 2>&1 | tee piactl_login.log
           rm pia_credentials.txt
 
-          echo "Connecting to PIA (verbose, timeout increased to 90 sec)..."
+          echo "Connecting to PIA (verbose, timeout 90 sec)..."
           sudo piactl connect --timeout 90 --debug 2>&1 | tee piactl_connect.log
           sleep 10
 
@@ -176,7 +178,6 @@ jobs:
                       const video = document.querySelector("video");
                       return video && !video.paused && !video.ended && video.readyState > 2;
                   });
-
                   if (!isPlaying) {
                       console.log("Video is not playing. Attempting VPN reconnect...");
                       await browser.close();
@@ -188,7 +189,6 @@ jobs:
                       }
                   }
               }
-
               const finalHtml = await page.content();
               const htmlFile = `./screenshots/final_rumble_page_${Date.now()}.html`;
               fs.writeFileSync(htmlFile, finalHtml);
