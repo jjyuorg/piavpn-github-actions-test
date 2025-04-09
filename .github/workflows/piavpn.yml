@@ -39,20 +39,19 @@ jobs:
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           chmod +x pia.run
 
-          # Start system D-Bus so installer’s systemd calls have a bus to connect to.
+          # Start system dbus daemon for systemd-related calls.
           echo "Starting system dbus daemon..."
           sudo dbus-daemon --system --fork
 
-          # Create non-root user 'piauser' if not already present.
+          # Create non-root user 'piauser' if not present.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
-
-          # Set up passwordless sudo for piauser.
+          # Configure passwordless sudo for piauser.
           echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
 
           echo "Running PIA installer as piauser..."
-          # Run the installer as piauser (without --noexec so that it extracts files)
+          # Run the installer as piauser. We ignore non-zero exit code due to systemd service creation.
           su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
 
           echo "Listing extracted files for debugging:"
@@ -65,16 +64,20 @@ jobs:
             exit 1
           fi
           echo "piactl found at: $PIACTL_PATH"
-          # Only copy if the real paths differ.
-          if [ "$(realpath "$PIACTL_PATH")" != "$(realpath /usr/local/bin/piactl)" ]; then
+          # Copy piactl to /usr/local/bin (skip if already identical).
+          if [ "$(realpath "$PIACTL_PATH")" != "$(realpath /usr/local/bin/piactl 2>/dev/null)" ]; then
             sudo cp "$PIACTL_PATH" /usr/local/bin/
             echo "piactl copied to /usr/local/bin."
           else
             echo "piactl is already in /usr/local/bin."
           fi
           echo "piactl installed at $(which piactl)"
+
           echo "Logging into PIA..."
-          sudo piactl login "$PIA_USERNAME" "$PIA_PASSWORD"
+          # Create temporary credentials file with username and password on separate lines.
+          echo -e "${PIA_USERNAME}\n${PIA_PASSWORD}" > pia_credentials.txt
+          sudo piactl login pia_credentials.txt
+          rm pia_credentials.txt
           echo "Connecting to PIA..."
           sudo piactl connect
           sleep 10
