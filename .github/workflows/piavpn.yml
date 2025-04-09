@@ -53,7 +53,6 @@ jobs:
           echo "Listing extracted files for debugging:"
           ls -R /home/piauser
 
-          # Search for the piactl binary in /home/piauser and /opt/piavpn.
           PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
             echo "piactl not found after installation. Exiting."
@@ -68,14 +67,13 @@ jobs:
           fi
           echo "piactl installed at $(which piactl)"
 
-          echo "Logging into PIA (timeout extended to 60 seconds)..."
-          # Create temporary credentials file with username on the first line and password on the second.
+          echo "Logging into PIA (verbose)..."
           echo -e "${PIA_USERNAME}\n${PIA_PASSWORD}" > pia_credentials.txt
-          sudo piactl login --timeout 60 pia_credentials.txt
+          sudo piactl login --timeout 60 --debug pia_credentials.txt 2>&1 | tee piactl_login.log
           rm pia_credentials.txt
 
-          echo "Connecting to PIA (timeout extended to 60 seconds)..."
-          sudo piactl connect --timeout 60
+          echo "Connecting to PIA (verbose)..."
+          sudo piactl connect --timeout 60 --debug 2>&1 | tee piactl_connect.log
           sleep 10
 
       - name: Install Puppeteer Dependencies
@@ -214,6 +212,8 @@ jobs:
           name: rumble-debug-artifact-${{ runner.os }}
           path: |
             screenshots/
+            piactl_login.log
+            piactl_connect.log
             *.log
             *.html
           retention-days: 7
