@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: jrei/systemd-ubuntu:20.04
-      # These options ensure systemd runs with proper tmpfs mounts and cgroup binding.
+      # The following options help start systemd: privileged mode, mount /run, /run/lock and bind /sys/fs/cgroup.
       options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro
     steps:
       - name: Checkout Repository
@@ -37,10 +37,11 @@ jobs:
           apt install -y curl wget sudo iproute2 apt-transport-https gnupg ca-certificates
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
           apt install -y nodejs
-          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 \
-            libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
-            libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxshmfence1 libxss1 \
-            libasound2-plugins libasound2 t64 libpulse0 libxkbcommon0 xdg-utils lsb-release
+          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+            libcups2 libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 \
+            libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 \
+            libxshmfence1 libxss1 libasound2-plugins libasound2 libpulse0 libxkbcommon0 \
+            xdg-utils lsb-release
 
       - name: Install and Connect PIA
         env:
@@ -54,20 +55,19 @@ jobs:
           echo "Starting system dbus daemon..."
           sudo dbus-daemon --system --fork || true
 
-          # Create non-root user 'piauser' if it doesn't exist.
+          # Create a non-root user "piauser" if it doesn't exist.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
           echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
 
           echo "Running PIA installer as piauser..."
-          # Run installer as piauser (using --accept and --nox11) and ignore non-zero exit codes.
           su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
 
           echo "Listing extracted files for debugging:"
           ls -R /home/piauser
 
-          # Locate the piactl binary (searching in both /home/piauser and /opt/piavpn).
+          # Search for piactl (case-insensitive) in both /home/piauser and /opt/piavpn.
           PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
             echo "piactl not found after installation. Exiting."
