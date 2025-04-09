@@ -8,13 +8,11 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-      - name: Run PIA VPN with Better Wait Logic
+      - name: Run PIA VPN with CA Certificate
         run: |
           # Disable immediate exit on error in the host shell so we can capture the exit code.
           set +e
           docker run --rm --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined ubuntu:latest bash -c '
-            # DO NOT use set -e here, it causes premature exit
-            
             export DEBIAN_FRONTEND=noninteractive
             echo "Installing dependencies..."
             apt update
@@ -27,7 +25,11 @@ jobs:
             echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
             
-            # Create config with compatible options
+            # Download the CA certificate
+            echo "Downloading PIA CA certificate..."
+            wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O /tmp/pia/ca.rsa.4096.crt
+            
+            # Create config with CA certificate
             echo "client" > /tmp/pia/pia.ovpn
             echo "dev tun" >> /tmp/pia/pia.ovpn
             echo "proto tcp" >> /tmp/pia/pia.ovpn
@@ -50,7 +52,7 @@ jobs:
             echo "fast-io" >> /tmp/pia/pia.ovpn
             echo "tls-client" >> /tmp/pia/pia.ovpn
             echo "remote-cert-tls server" >> /tmp/pia/pia.ovpn
-            echo "ns-cert-type server" >> /tmp/pia/pia.ovpn
+            echo "ca /tmp/pia/ca.rsa.4096.crt" >> /tmp/pia/pia.ovpn
             
             # Show contents of the config file
             echo "OpenVPN config:"
