@@ -39,32 +39,26 @@ jobs:
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           chmod +x pia.run
 
-          # Start system dbus daemon for systemd-related calls.
           echo "Starting system dbus daemon..."
           sudo dbus-daemon --system --fork
 
-          # Create non-root user 'piauser' if not present.
           if ! id piauser >/dev/null 2>&1; then
             sudo adduser --disabled-password --gecos "" piauser
           fi
-          # Configure passwordless sudo for piauser.
           echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
 
           echo "Running PIA installer as piauser..."
-          # Run the installer as piauser. We ignore non-zero exit code due to systemd service creation.
           su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
 
           echo "Listing extracted files for debugging:"
           ls -R /home/piauser
 
-          # Search for piactl (case-insensitive) in both /home/piauser and /opt/piavpn.
           PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
             echo "piactl not found after installation. Exiting."
             exit 1
           fi
           echo "piactl found at: $PIACTL_PATH"
-          # Copy piactl to /usr/local/bin (skip if already identical).
           if [ "$(realpath "$PIACTL_PATH")" != "$(realpath /usr/local/bin/piactl 2>/dev/null)" ]; then
             sudo cp "$PIACTL_PATH" /usr/local/bin/
             echo "piactl copied to /usr/local/bin."
@@ -74,12 +68,12 @@ jobs:
           echo "piactl installed at $(which piactl)"
 
           echo "Logging into PIA..."
-          # Create temporary credentials file with username and password on separate lines.
           echo -e "${PIA_USERNAME}\n${PIA_PASSWORD}" > pia_credentials.txt
-          sudo piactl login pia_credentials.txt
+          sudo piactl login --timeout 30 pia_credentials.txt
           rm pia_credentials.txt
+
           echo "Connecting to PIA..."
-          sudo piactl connect
+          sudo piactl connect --timeout 30
           sleep 10
 
       - name: Install Puppeteer Dependencies
