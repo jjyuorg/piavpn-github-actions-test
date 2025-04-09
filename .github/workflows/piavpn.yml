@@ -35,8 +35,10 @@ jobs:
           PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
         run: |
           echo "Downloading PIA client..."
-          curl -o pia.deb https://installers.privateinternetaccess.com/download/pia-linux-ubuntu.deb
+          curl -L -o pia.deb https://installers.privateinternetaccess.com/download/pia-linux.deb
           sudo dpkg -i pia.deb || sudo apt-get install -f -y
+          # Optionally verify installation
+          which piactl || { echo "piactl not found. Exiting."; exit 1; }
           echo "Logging into PIA..."
           sudo piactl login "$PIA_USERNAME" "$PIA_PASSWORD"
           echo "Connecting to PIA..."
@@ -60,125 +62,4 @@ jobs:
           puppeteer.use(StealthPlugin());
 
           function sleep(ms) {
-              return new Promise(resolve => setTimeout(resolve, ms));
-          }
-
-          async function safeScreenshot(page, path) {
-              try {
-                  await page.screenshot({ path });
-                  console.log(`Screenshot taken: ${path}`);
-              } catch (err) {
-                  console.error(`Failed to take screenshot ${path}: ${err.message}`);
-              }
-          }
-
-          async function reconnectVPN() {
-              console.log("Reconnecting to a different VPN server...");
-              try {
-                  execSync("sudo piactl disconnect", { stdio: 'inherit' });
-                  await sleep(10000);
-                  execSync("sudo piactl connect", { stdio: 'inherit' });
-                  await sleep(10000);
-                  const newIP = execSync("curl -s https://api64.ipify.org").toString().trim();
-                  console.log("New VPN IP:", newIP);
-                  return true;
-              } catch (error) {
-                  console.error("Failed to reconnect VPN:", error.message);
-                  return reconnectVPN();
-              }
-          }
-
-          async function visitRumble(videoUrl) {
-              let browser = await puppeteer.launch({
-                  headless: "new",
-                  ignoreHTTPSErrors: true,
-                  executablePath: require('puppeteer').executablePath(),
-                  args: ['--no-sandbox', '--disable-setuid-sandbox']
-              });
-
-              let page = await browser.newPage();
-              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
-              await page.setCacheEnabled(false);
-
-              console.log("Navigating to Rumble video...");
-              await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-              await sleep(3000);
-              await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
-
-              const playButtonSelectors = [
-                  '.bigPlayUIInner.ctp',
-                  'button[aria-label="Play"]',
-                  '.vjs-big-play-button',
-                  '.icon-play',
-                  'div[class*=play]'
-              ];
-
-              let playButton = null;
-              for (const selector of playButtonSelectors) {
-                  playButton = await page.$(selector);
-                  if (playButton) {
-                      console.log(`Play button found using selector: ${selector}`);
-                      await playButton.click();
-                      await sleep(3000);
-                      await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
-                      break;
-                  }
-              }
-
-              if (!playButton) {
-                  console.warn("Play button not found. Proceeding without clicking.");
-              }
-
-              for (let t = 5; t <= 30; t += 5) {
-                  await sleep(5000);
-                  await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
-                  const isPlaying = await page.evaluate(() => {
-                      const video = document.querySelector("video");
-                      return video && !video.paused && !video.ended && video.readyState > 2;
-                  });
-
-                  if (!isPlaying) {
-                      console.log("Video is not playing. Attempting VPN reconnect...");
-                      await browser.close();
-                      const reconnected = await reconnectVPN();
-                      if (reconnected) {
-                          return await visitRumble(videoUrl);
-                      } else {
-                          throw new Error("VPN reconnect failed. Aborting.");
-                      }
-                  }
-              }
-
-              const finalHtml = await page.content();
-              const htmlFile = `./screenshots/final_rumble_page_${Date.now()}.html`;
-              fs.writeFileSync(htmlFile, finalHtml);
-              console.log(`Final HTML page saved: ${htmlFile}`);
-              await browser.close();
-          }
-
-          async function run() {
-              const videoUrl = process.argv[2] || "https://rumble.com/v6r0vz6-automate.html";
-              await visitRumble(videoUrl);
-          }
-
-          run().catch(error => {
-              console.error("Script failed:", error.message);
-          });
-          EOF
-
-      - name: Run Puppeteer Script
-        run: |
-          VIDEO_URL="${{ github.event.inputs.video_url || 'https://rumble.com/v6r0vz6-automate.html' }}"
-          echo "Visiting: $VIDEO_URL"
-          node scripts/rumble-visit.js "$VIDEO_URL" | tee rumble_script_output.log
-
-      - name: Upload Debug Artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rumble-debug-artifact-${{ runner.os }}
-          path: |
-            screenshots/
-            *.log
-            *.html
-          retention-days: 7
+              return new Promise(resolve
