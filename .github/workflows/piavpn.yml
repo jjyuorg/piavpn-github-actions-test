@@ -15,8 +15,8 @@ jobs:
   rumble-vpn:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/catthehacker/ubuntu:systemd
-      # Docker options to enable systemd inside the container.
+      image: jrei/systemd-ubuntu:20.04
+      # The options below enable systemd inside the container.
       options: --privileged --tmpfs /run --tmpfs /run/lock -v /sys/fs/cgroup:/sys/fs/cgroup:ro
     steps:
       - name: Checkout Repository
@@ -37,10 +37,7 @@ jobs:
           apt install -y curl wget sudo iproute2 apt-transport-https gnupg ca-certificates
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
           apt install -y nodejs
-          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 \
-            libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
-            libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxshmfence1 libxss1 \
-            libasound2t64 libpulse0 libxkbcommon0 xdg-utils lsb-release libasound2-plugins
+          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 libxshmfence1 libxss1 libasound2t64 libpulse0 libxkbcommon0 xdg-utils lsb-release libasound2-plugins
 
       - name: Install and Connect PIA
         env:
@@ -64,7 +61,7 @@ jobs:
 
           echo "Listing extracted files for debugging:"
           ls -R /home/piauser
-
+          
           PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
           if [ -z "$PIACTL_PATH" ]; then
             echo "piactl not found after installation. Exiting."
@@ -101,13 +98,13 @@ jobs:
           const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           const fs = require('fs');
           const { execSync } = require('child_process');
-
+          
           puppeteer.use(StealthPlugin());
-
+          
           function sleep(ms) {
               return new Promise(resolve => setTimeout(resolve, ms));
           }
-
+          
           async function safeScreenshot(page, path) {
               try {
                   await page.screenshot({ path });
@@ -116,7 +113,7 @@ jobs:
                   console.error(`Failed to take screenshot ${path}: ${err.message}`);
               }
           }
-
+          
           async function reconnectVPN() {
               console.log("Reconnecting to a different VPN server...");
               try {
@@ -132,7 +129,7 @@ jobs:
                   return reconnectVPN();
               }
           }
-
+          
           async function visitRumble(videoUrl) {
               let browser = await puppeteer.launch({
                   headless: "new",
@@ -140,16 +137,16 @@ jobs:
                   executablePath: require('puppeteer').executablePath(),
                   args: ['--no-sandbox', '--disable-setuid-sandbox']
               });
-
+          
               let page = await browser.newPage();
               await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
               await page.setCacheEnabled(false);
-
+          
               console.log("Navigating to Rumble video...");
               await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 120000 });
               await sleep(3000);
               await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
-
+          
               const playButtonSelectors = [
                   '.bigPlayUIInner.ctp',
                   'button[aria-label="Play"]',
@@ -157,7 +154,7 @@ jobs:
                   '.icon-play',
                   'div[class*=play]'
               ];
-
+          
               let playButton = null;
               for (const selector of playButtonSelectors) {
                   playButton = await page.$(selector);
@@ -169,11 +166,11 @@ jobs:
                       break;
                   }
               }
-
+          
               if (!playButton) {
                   console.warn("Play button not found. Proceeding without clicking.");
               }
-
+          
               for (let t = 5; t <= 30; t += 5) {
                   await sleep(5000);
                   await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
@@ -198,12 +195,12 @@ jobs:
               console.log(`Final HTML page saved: ${htmlFile}`);
               await browser.close();
           }
-
+          
           async function run() {
               const videoUrl = process.argv[2] || "https://rumble.com/v6r0vz6-automate.html";
               await visitRumble(videoUrl);
           }
-
+          
           run().catch(error => {
               console.error("Script failed:", error.message);
           });
