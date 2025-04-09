@@ -3,7 +3,7 @@ name: Rumble Visit with VPN in Container
 on:
   push:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/15 * * * *" # Reduced frequency slightly
   workflow_dispatch:
     inputs:
       video_url:
@@ -22,26 +22,45 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Debug Systemd and D-Bus Status
+      - name: Increase Swap Space (Optional, might help with resources)
+        run: |
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+          sudo sysctl vm.swappiness=10
+          sudo sysctl vm.vfs_cache_pressure=50
+          echo "Swap status:"
+          sudo swapon --show
+          free -h
+
+      - name: Debug Initial Systemd and D-Bus Status
         run: |
           echo "=== Systemd Version ==="
-          systemctl --version || true
-          echo "=== Systemctl Status ==="
-          systemctl status || true
-          echo "=== D-Bus List Names ==="
-          dbus-send --system --dest=org.freedesktop.DBus --print-reply / org.freedesktop.DBus.ListNames || true
+          systemd --version
+          echo "=== Systemctl Status (Initial) ==="
+          systemctl status || true # Might show degraded state initially, it's okay
+          echo "=== D-Bus Daemon Process ==="
+          ps aux | grep 'dbus-daemon.*--system' || echo "D-Bus system daemon not found yet"
+          echo "=== D-Bus List Names (Initial) ==="
+          # Give D-Bus a moment
+          sleep 5
+          dbus-send --system --dest=org.freedesktop.DBus --print-reply / org.freedesktop.DBus.ListNames || echo "Failed to list D-Bus names initially"
 
-      - name: Install Essential Dependencies
+      - name: Install Essential Dependencies and PIA/Puppeteer Reqs
         run: |
           apt update
-          apt install -y curl wget sudo iproute2 apt-transport-https gnupg ca-certificates
+          # Essential tools, node, networking, dbus
+          apt install -y curl wget sudo iproute2 apt-transport-https gnupg ca-certificates dbus-x11 # Added dbus-x11 just in case
+          # Node.js PPA and install
           curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
           apt install -y nodejs
-          apt install -y fonts-liberation libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+          # Puppeteer / Headless Chrome dependencies
+          apt install -y fonts-liberation libasound2 libasound2-plugins libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
             libcups2 libdbus-1-3 libgbm1 libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 \
-            libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxrandr2 \
-            libxshmfence1 libxss1 libasound2-plugins libasound2 libpulse0 libxkbcommon0 \
-            xdg-utils lsb-release
+            libu2f-udev libvulkan1 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 \
+            libxrandr2 libxshmfence1 libxss1 xdg-utils lsb-release
 
       - name: Install and Connect PIA
         env:
@@ -52,85 +71,139 @@ jobs:
           curl -L -o pia.run https://installers.privateinternetaccess.com/download/pia-linux-3.3.1-06924.run
           chmod +x pia.run
 
-          echo "Starting system dbus daemon..."
-          sudo dbus-daemon --system --fork || true
-
-          # Create non-root user 'piauser' if needed.
-          if ! id piauser >/dev/null 2>&1; then
-            sudo adduser --disabled-password --gecos "" piauser
-          fi
-          echo "piauser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/piauser
-
-          echo "Running PIA installer as piauser..."
-          su - piauser -c "$(pwd)/pia.run --accept --nox11" || true
-
-          echo "Listing extracted files for debugging:"
-          ls -R /home/piauser
-
-          # Search for the piactl binary (search both in /home/piauser and /opt/piavpn).
-          PIACTL_PATH=$(find /home/piauser /opt/piavpn -iname "piactl" -type f | head -1)
-          if [ -z "$PIACTL_PATH" ]; then
-            echo "piactl not found after installation. Exiting."
-            exit 1
-          fi
-          echo "piactl found at: $PIACTL_PATH"
-          if [ "$(realpath "$PIACTL_PATH")" != "$(realpath /usr/local/bin/piactl 2>/dev/null)" ]; then
-            sudo cp "$PIACTL_PATH" /usr/local/bin/
-            echo "piactl copied to /usr/local/bin."
+          echo "Checking D-Bus system daemon before install..."
+          # Ensure system D-Bus is running (systemd should handle this, but let's check)
+          if ! pgrep -f "dbus-daemon --system"; then
+            echo "System D-Bus daemon not found, attempting to start..."
+            sudo systemctl start dbus.service || sudo dbus-daemon --system --fork
+            sleep 5 # Give it time
+            if ! pgrep -f "dbus-daemon --system"; then
+               echo "Failed to start system D-Bus daemon!"
+               # Optionally check logs: journalctl -u dbus.service
+               exit 1
+            fi
           else
-            echo "piactl is already in /usr/local/bin."
+            echo "System D-Bus daemon seems to be running."
           fi
-          echo "piactl installed at $(which piactl)"
 
-          # Create a temporary credentials file.
+          echo "Running PIA installer with sudo..."
+          # Run installer directly with sudo, accepting license and disabling GUI setup
+          # The installer should handle service registration via systemd
+          sudo ./pia.run --accept --nox11
+          INSTALL_EXIT_CODE=$?
+          if [ $INSTALL_EXIT_CODE -ne 0 ]; then
+              echo "PIA installer failed with exit code $INSTALL_EXIT_CODE."
+              # Consider checking install logs if they exist (e.g., in /tmp or /var/log)
+              exit 1
+          fi
+          echo "PIA installer finished. Waiting for service to potentially start..."
+          sleep 15 # Wait for piavpn service to potentially initialize
+
+          echo "Checking for piactl..."
+          # Common install locations. The installer *should* put it in PATH.
+          if command -v piactl &> /dev/null; then
+             PIACTL_CMD="piactl"
+             echo "piactl found in PATH: $(which piactl)"
+          elif [ -x "/opt/piavpn/bin/piactl" ]; then
+             PIACTL_CMD="/opt/piavpn/bin/piactl"
+             echo "piactl found at /opt/piavpn/bin/piactl"
+          else
+             echo "piactl command not found after installation. Searching..."
+             FOUND_PIACTL=$(sudo find /opt /usr/local /home -name piactl -type f -executable 2>/dev/null | head -n 1)
+             if [ -n "$FOUND_PIACTL" ]; then
+               echo "Found piactl at $FOUND_PIACTL"
+               PIACTL_CMD="$FOUND_PIACTL"
+             else
+               echo "ERROR: piactl executable not found after installation!"
+               exit 1
+             fi
+          fi
+
+          echo "Attempting to check PIA service status (best effort)..."
+          # The exact service name might vary, piavpn.service is common
+          sudo systemctl status piavpn.service || echo "Could not get status for piavpn.service (might be named differently or not fully started yet)."
+          sleep 5
+
+          echo "Checking current IP before VPN..."
+          curl -sf ipinfo.io/ip || curl -sf ifconfig.me || echo "Could not fetch initial IP"
+
+          echo "Attempting to log in to PIA..."
+          # Create a temporary credentials file securely
           echo -e "${PIA_USERNAME}\n${PIA_PASSWORD}" > pia_credentials.txt
-          
-          # Retry login up to 3 times with 150 sec timeout.
+          sudo chmod 600 pia_credentials.txt # Restrict permissions
+
           MAX_RETRIES=3
           retry=0
           login_success=0
           while [ $retry -lt $MAX_RETRIES ]; do
-            echo "Attempting to log in to PIA (try $((retry+1))/$MAX_RETRIES)..."
-            if sudo piactl login --timeout 150 --debug pia_credentials.txt 2>&1 | tee piactl_login.log; then
+            echo "Login attempt $((retry+1))/$MAX_RETRIES..."
+            # Run login with sudo, provide full path if necessary
+            if sudo ${PIACTL_CMD} login --timeout 150 --debug pia_credentials.txt 2>&1 | tee piactl_login_${retry}.log; then
               login_success=1
+              echo "PIA login successful."
               break
             fi
             retry=$((retry+1))
-            echo "Login attempt $retry failed. Retrying in 10 seconds..."
-            sleep 10
+            echo "Login attempt $retry failed. Retrying in 15 seconds..."
+            sleep 15
           done
-          rm pia_credentials.txt
+          sudo rm pia_credentials.txt # Remove credentials file immediately
           if [ $login_success -ne 1 ]; then
             echo "PIA login failed after $MAX_RETRIES attempts."
+            cat piactl_login_*.log # Show logs on failure
             exit 1
           fi
 
-          echo "Attempting to connect to PIA (timeout 150 sec, verbose)..."
+          echo "Attempting to connect to PIA..."
           retry=0
           connect_success=0
           while [ $retry -lt $MAX_RETRIES ]; do
-            if sudo piactl connect --timeout 150 --debug 2>&1 | tee piactl_connect.log; then
-              connect_success=1
-              break
+            echo "Connect attempt $((retry+1))/$MAX_RETRIES..."
+            if sudo ${PIACTL_CMD} connect --timeout 150 --debug 2>&1 | tee piactl_connect_${retry}.log; then
+               # Add an extra check for connection state
+               sleep 5 # Give connection time to establish fully
+               CONN_STATE=$(sudo ${PIACTL_CMD} get connectionstate)
+               echo "Connection state reported by piactl: $CONN_STATE"
+               if [ "$CONN_STATE" = "Connected" ]; then
+                  connect_success=1
+                  echo "PIA connection successful and state verified."
+                  break
+               else
+                  echo "piactl connect command succeeded but state is '$CONN_STATE'. Retrying connection..."
+                  sudo ${PIACTL_CMD} disconnect || true # Attempt disconnect before retrying
+                  sleep 10
+               fi
             fi
             retry=$((retry+1))
-            echo "Connect attempt $retry failed. Retrying in 10 seconds..."
-            sleep 10
+            echo "Connect attempt $retry failed. Retrying in 15 seconds..."
+            sleep 15
           done
+
           if [ $connect_success -ne 1 ]; then
             echo "PIA connect failed after $MAX_RETRIES attempts."
+            cat piactl_connect_*.log # Show logs on failure
+            sudo ${PIACTL_CMD} get status || true # Get general status on failure
             exit 1
           fi
-          sleep 10
+
+          echo "Waiting for network route to stabilize..."
+          sleep 15
+
+          echo "Checking current IP after VPN connection..."
+          curl -sf ipinfo.io/ip || curl -sf ifconfig.me || echo "Could not fetch IP after VPN connection"
+          echo "VPN setup complete."
 
       - name: Install Puppeteer Dependencies
         run: |
           npm init -y
-          npm install puppeteer puppeteer-core puppeteer-extra puppeteer-extra-plugin-stealth
+          # Install specific chromium revision if needed later, but start default
+          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
 
       - name: Create Puppeteer Script for Rumble
         run: |
           mkdir -p scripts screenshots
+          # --- Keep your existing Puppeteer script content here ---
+          # (No changes suggested to the script logic itself *yet*)
           cat > scripts/rumble-visit.js << 'EOF'
           const puppeteer = require('puppeteer-extra');
           const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -146,99 +219,194 @@ jobs:
           async function safeScreenshot(page, path) {
               try {
                   await page.screenshot({ path });
-                  console.log(\`Screenshot taken: \${path}\`);
+                  console.log(`Screenshot taken: ${path}`);
               } catch (err) {
-                  console.error(\`Failed to take screenshot \${path}: \${err.message}\`);
+                  console.error(`Failed to take screenshot ${path}: ${err.message}`);
               }
           }
 
+          // Keep reconnectVPN function as is for now
           async function reconnectVPN() {
-              console.log("Reconnecting to a different VPN server...");
-              try {
-                  execSync("sudo piactl disconnect", { stdio: 'inherit' });
-                  await sleep(10000);
-                  execSync("sudo piactl connect", { stdio: 'inherit' });
-                  await sleep(10000);
-                  const newIP = execSync("curl -s https://api64.ipify.org").toString().trim();
-                  console.log("New VPN IP:", newIP);
+            console.log("Attempting to reconnect to a different VPN server...");
+            try {
+                // Use the detected piactl command path if needed, or rely on PATH
+                const piactlCmd = process.env.PIACTL_CMD || 'piactl';
+                execSync(`sudo ${piactlCmd} disconnect`, { stdio: 'inherit' });
+                await sleep(10000);
+                execSync(`sudo ${piactlCmd} set region auto`, { stdio: 'inherit' }); // Try setting to auto region
+                await sleep(5000);
+                execSync(`sudo ${piactlCmd} connect`, { stdio: 'inherit' });
+                await sleep(15000); // Longer wait after reconnect
+                const newIP = execSync("curl -sf ipinfo.io/ip || curl -sf ifconfig.me").toString().trim();
+                console.log("New VPN IP attempt resulted in:", newIP || "Could not fetch IP");
+                // Add check if connection state is actually 'Connected'
+                const connState = execSync(`sudo ${piactlCmd} get connectionstate`).toString().trim();
+                console.log(`Connection state after reconnect attempt: ${connState}`);
+                if (connState === "Connected") {
                   return true;
-              } catch (error) {
-                  console.error("Failed to reconnect VPN:", error.message);
-                  return reconnectVPN();
-              }
+                } else {
+                  console.error("VPN reconnect attempt failed to achieve 'Connected' state.");
+                  // Optional: implement limited retries for reconnect itself
+                  return false; // Indicate reconnect failure
+                }
+            } catch (error) {
+                console.error("Failed during VPN reconnect:", error.message);
+                // Avoid infinite recursion on reconnect failure
+                return false; // Indicate reconnect failure
+            }
           }
 
           async function visitRumble(videoUrl) {
+              console.log('Launching Puppeteer...');
               let browser = await puppeteer.launch({
-                  headless: "new",
+                  headless: "new", // Use new headless mode
+                  // executablePath: '/usr/bin/google-chrome-stable', // Explicitly specify if needed after installing chrome
                   ignoreHTTPSErrors: true,
-                  executablePath: require('puppeteer').executablePath(),
-                  args: ['--no-sandbox', '--disable-setuid-sandbox']
+                  args: [
+                      '--no-sandbox',
+                      '--disable-setuid-sandbox',
+                      '--disable-dev-shm-usage', // Often needed in CI/Docker
+                      '--disable-accelerated-2d-canvas',
+                      '--no-zygote',
+                      '--disable-gpu', // Disable GPU hardware acceleration
+                      '--window-size=1920x1080' // Set a reasonable window size
+                  ]
               });
 
-              let page = await browser.newPage();
-              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36');
-              await page.setCacheEnabled(false);
+              let page; // Define page outside try block
 
-              console.log("Navigating to Rumble video...");
-              await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 120000 });
-              await sleep(3000);
-              await safeScreenshot(page, \`./screenshots/rumble_landing_\${Date.now()}.png\`);
+              try {
+                 page = await browser.newPage();
+                 await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'); // Use a slightly older but common UA
+                 await page.setViewport({ width: 1920, height: 1080 });
+                 await page.setCacheEnabled(false);
 
-              const playButtonSelectors = [
-                  '.bigPlayUIInner.ctp',
-                  'button[aria-label="Play"]',
-                  '.vjs-big-play-button',
-                  '.icon-play',
-                  'div[class*=play]'
-              ];
+                 console.log(`Navigating to Rumble video: ${videoUrl}`);
+                 // Increased timeout, wait for load and idle
+                 await page.goto(videoUrl, { waitUntil: ['load', 'networkidle2'], timeout: 180000 });
+                 console.log("Page loaded initially.");
+                 await sleep(5000); // Wait longer after load
+                 await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
 
-              let playButton = null;
-              for (const selector of playButtonSelectors) {
-                  playButton = await page.$(selector);
-                  if (playButton) {
-                      console.log(\`Play button found using selector: \${selector}\`);
-                      await playButton.click();
-                      await sleep(3000);
-                      await safeScreenshot(page, \`./screenshots/rumble_play_clicked_\${Date.now()}.png\`);
-                      break;
-                  }
+                 const playButtonSelectors = [
+                     '.rumble-player-main-play-button', // Check developer tools for current selectors
+                     'button[aria-label="Play"]',
+                     '.vjs-big-play-button',
+                     '.video-player--play',
+                     'div[class*=play-button]', // More generic
+                     'div[class*=play i]' // Icon-based potentially
+                 ];
+
+                 let playButtonClicked = false;
+                 for (const selector of playButtonSelectors) {
+                     try {
+                        console.log(`Trying selector: ${selector}`);
+                        const playButton = await page.$(selector);
+                        if (playButton) {
+                           console.log(`Play button found using selector: ${selector}. Attempting click.`);
+                           // Wait for button to be interactable if needed
+                           await page.waitForSelector(selector, { visible: true, timeout: 10000 });
+                           await playButton.click({ delay: 100 }); // Add small delay
+                           console.log("Play button clicked.");
+                           playButtonClicked = true;
+                           await sleep(5000); // Wait after click
+                           await safeScreenshot(page, `./screenshots/rumble_play_clicked_${Date.now()}.png`);
+                           break;
+                        } else {
+                           console.log(`Selector ${selector} did not find a button.`);
+                        }
+                     } catch (clickError) {
+                        console.warn(`Error clicking play button with selector ${selector}: ${clickError.message}`);
+                        await safeScreenshot(page, `./screenshots/rumble_play_click_error_${Date.now()}.png`);
+                     }
+                 }
+                 if (!playButtonClicked) {
+                     console.warn("Could not find or click any known play button. Proceeding to watch phase, video might not play.");
+                     await safeScreenshot(page, `./screenshots/rumble_play_not_clicked_${Date.now()}.png`);
+                 }
+
+                 // Watching phase
+                 const watchDurationSeconds = 30;
+                 const checkIntervalSeconds = 5;
+                 console.log(`Attempting to watch for ${watchDurationSeconds} seconds...`);
+                 for (let t = checkIntervalSeconds; t <= watchDurationSeconds; t += checkIntervalSeconds) {
+                    await sleep(checkIntervalSeconds * 1000);
+                    await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
+
+                    // Check for potential blocking overlays (like Cookie banners, GDPR etc.)
+                    // Add selectors for common banners if you identify them from screenshots
+                    // Example: await page.evaluate(() => { document.querySelector('#cookie-banner-button')?.click(); });
+
+                    const isPlaying = await page.evaluate(() => {
+                       const video = document.querySelector("video");
+                       // Check if video exists, is visible, has minimum duration, and seems to be progressing
+                       return video &&
+                              video.offsetHeight > 0 && // Is it visible?
+                              video.duration > 0 &&    // Does it have a duration?
+                              !video.paused &&         // Is it not paused?
+                              !video.ended &&          // Has it not ended?
+                              video.readyState >= 3;   // HAVE_FUTURE_DATA or HAVE_ENOUGH_DATA
+                    });
+
+                    if (!isPlaying && playButtonClicked) { // Only try reconnect if we expect it to play
+                        console.log(`Video playback state check failed at ${t}s. isPlaying=${isPlaying}`);
+                        const videoState = await page.evaluate(() => {
+                           const video = document.querySelector("video");
+                           return video ? { paused: video.paused, ended: video.ended, readyState: video.readyState, currentTime: video.currentTime, duration: video.duration, networkState: video.networkState, error: video.error?.message } : null;
+                        });
+                        console.log("Current video state:", videoState);
+
+                        console.log("Attempting VPN reconnect due to playback issue...");
+                        await browser.close(); // Close browser before VPN reconnect
+
+                        // Pass piactl command to environment for script
+                        process.env.PIACTL_CMD = process.env.PIACTL_CMD || 'piactl';
+                        const reconnected = await reconnectVPN();
+
+                        if (reconnected) {
+                           console.log("VPN reconnected successfully, restarting visitRumble...");
+                           // Important: Need to return the result of the recursive call
+                           return await visitRumble(videoUrl);
+                        } else {
+                           throw new Error("VPN reconnect failed or did not result in a connected state. Aborting.");
+                        }
+                    } else if (isPlaying) {
+                       console.log(`Video appears to be playing at ${t}s.`);
+                    } else {
+                       console.log(`Video not playing at ${t}s, but play button wasn't clicked/found. Monitoring continues.`);
+                    }
+                 }
+
+                 console.log("Watch duration completed.");
+                 const finalHtml = await page.content();
+                 const htmlFile = `./screenshots/final_rumble_page_${Date.now()}.html`;
+                 fs.writeFileSync(htmlFile, finalHtml);
+                 console.log(`Final HTML page saved: ${htmlFile}`);
+
+              } catch (error) {
+                 console.error("Error during Puppeteer execution:", error);
+                 if (page) { // Ensure page exists before screenshotting
+                    await safeScreenshot(page, `./screenshots/rumble_ERROR_${Date.now()}.png`);
+                 }
+                 throw error; // Re-throw error to fail the job step
+              } finally {
+                 if (browser) {
+                    console.log("Closing browser.");
+                    await browser.close();
+                 }
               }
-              if (!playButton) {
-                  console.warn("Play button not found. Proceeding without clicking.");
-              }
-              for (let t = 5; t <= 30; t += 5) {
-                  await sleep(5000);
-                  await safeScreenshot(page, \`./screenshots/rumble_watch_\${t}s_\${Date.now()}.png\`);
-                  const isPlaying = await page.evaluate(() => {
-                      const video = document.querySelector("video");
-                      return video && !video.paused && !video.ended && video.readyState > 2;
-                  });
-                  if (!isPlaying) {
-                      console.log("Video is not playing. Attempting VPN reconnect...");
-                      await browser.close();
-                      const reconnected = await reconnectVPN();
-                      if (reconnected) {
-                          return await visitRumble(videoUrl);
-                      } else {
-                          throw new Error("VPN reconnect failed. Aborting.");
-                      }
-                  }
-              }
-              const finalHtml = await page.content();
-              const htmlFile = \`./screenshots/final_rumble_page_\${Date.now()}.html\`;
-              fs.writeFileSync(htmlFile, finalHtml);
-              console.log(\`Final HTML page saved: \${htmlFile}\`);
-              await browser.close();
           }
 
           async function run() {
               const videoUrl = process.argv[2] || "https://rumble.com/v6r0vz6-automate.html";
+              // Pass piactl command path to the script environment if detected earlier
+              process.env.PIACTL_CMD = process.env.PIACTL_CMD || 'piactl';
               await visitRumble(videoUrl);
           }
 
           run().catch(error => {
               console.error("Script failed:", error.message);
+              process.exit(1); // Ensure the GitHub Action step fails
           });
           EOF
 
@@ -246,6 +414,8 @@ jobs:
         run: |
           VIDEO_URL="${{ github.event.inputs.video_url || 'https://rumble.com/v6r0vz6-automate.html' }}"
           echo "Visiting: $VIDEO_URL"
+          # Ensure piactl command is passed if needed, get it from the previous step's logic output or default
+          # This assumes piactl is now in PATH or /opt/piavpn/bin/piactl is used inside node script
           node scripts/rumble-visit.js "$VIDEO_URL" | tee rumble_script_output.log
 
       - name: Upload Debug Artifacts
@@ -255,8 +425,8 @@ jobs:
           name: rumble-debug-artifact-${{ runner.os }}
           path: |
             screenshots/
-            piactl_login.log
-            piactl_connect.log
-            *.log
-            *.html
+            piactl_login_*.log
+            piactl_connect_*.log
+            rumble_script_output.log
+            *.html # Include final HTML page
           retention-days: 7
