@@ -18,14 +18,18 @@ jobs:
             echo "Installing dependencies..."
             apt update && apt install -y --no-install-recommends curl wget openvpn ca-certificates iproute2
             
+            echo "Testing DNS resolution in container..."
+            echo "Host GitHub.com resolves to: $(getent hosts github.com | head -1 || echo "Failed to resolve")"
+            
             echo "Setting up OpenVPN configuration..."
             mkdir -p /tmp/pia
             
-            # Create minimal OpenVPN config without using heredoc
+            # Create minimal OpenVPN config without using DNS hostnames
             echo "client" > /tmp/pia/pia.ovpn
             echo "dev tun" >> /tmp/pia/pia.ovpn
             echo "proto tcp" >> /tmp/pia/pia.ovpn
-            echo "remote ny.privateinternetaccess.com 443" >> /tmp/pia/pia.ovpn
+            # Using direct IP address instead of hostname (New York server)
+            echo "remote 193.37.253.181 443" >> /tmp/pia/pia.ovpn
             echo "resolv-retry infinite" >> /tmp/pia/pia.ovpn
             echo "nobind" >> /tmp/pia/pia.ovpn
             echo "persist-key" >> /tmp/pia/pia.ovpn
@@ -36,8 +40,11 @@ jobs:
             echo "remote-cert-tls server" >> /tmp/pia/pia.ovpn
             echo "auth-user-pass /tmp/pia/auth.txt" >> /tmp/pia/pia.ovpn
             echo "comp-lzo" >> /tmp/pia/pia.ovpn
-            echo "verb 1" >> /tmp/pia/pia.ovpn
+            echo "verb 3" >> /tmp/pia/pia.ovpn
             echo "reneg-sec 0" >> /tmp/pia/pia.ovpn
+            # Add explicit DNS settings
+            echo "dhcp-option DNS 8.8.8.8" >> /tmp/pia/pia.ovpn
+            echo "dhcp-option DNS 8.8.4.4" >> /tmp/pia/pia.ovpn
             
             # Download CA certificate
             wget -q https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt -O /tmp/pia/ca.rsa.4096.crt
@@ -60,10 +67,15 @@ jobs:
                 echo "VPN connection successful!"
                 exit 0
               fi
+              # Show partial logs every few attempts
+              if [ $((i % 3)) -eq 0 ]; then
+                echo "Current OpenVPN log:"
+                tail -n 10 /tmp/openvpn.log
+              fi
               sleep 3
             done
             
-            echo "VPN connection timed out. OpenVPN logs:"
+            echo "VPN connection timed out. Full OpenVPN logs:"
             cat /tmp/openvpn.log
             exit 1
           '
