@@ -15,8 +15,8 @@ jobs:
   rumble-vpn:
     runs-on: ubuntu-latest
     
-    # Use an ubuntu:latest container, privileged for tun0 creation
     container:
+      # Privileged container so we can create tun0
       image: ubuntu:latest
       options: --privileged --cap-add=NET_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined
 
@@ -28,9 +28,9 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg
-
-          # Puppeteer shared libs (but skip ALSA; we'll handle that separately)
+          apt-get install -y wget curl unzip openvpn iproute2 dnsutils ca-certificates gnupg psmisc
+          
+          # Puppeteer shared libraries (but skip ALSA; we'll do fallback next)
           apt-get install -y \
             fonts-liberation \
             libatk-bridge2.0-0 \
@@ -86,6 +86,7 @@ jobs:
           echo "$PIA_PASSWORD" >> auth.txt
           chmod 600 auth.txt
 
+          # Modify us_east.ovpn as an initial config
           SERVER_FILE=us_east.ovpn
           sed -i 's/auth-user-pass/auth-user-pass \/tmp\/pia\/auth.txt/' $SERVER_FILE
           echo 'dhcp-option DNS 8.8.8.8' >> $SERVER_FILE
@@ -125,6 +126,8 @@ jobs:
           const puppeteer = require('puppeteer-extra');
           const StealthPlugin = require('puppeteer-extra-plugin-stealth');
           const fs = require('fs');
+          const { execSync } = require('child_process');
+          const path = require('path');
 
           puppeteer.use(StealthPlugin());
 
@@ -132,79 +135,160 @@ jobs:
             return new Promise(resolve => setTimeout(resolve, ms));
           }
 
-          async function safeScreenshot(page, path) {
+          async function safeScreenshot(page, filename) {
             try {
-              await page.screenshot({ path });
-              console.log(`Screenshot taken: ${path}`);
+              await page.screenshot({ path: filename });
+              console.log(\`Screenshot taken: \${filename}\`);
             } catch (err) {
-              console.error(`Failed to take screenshot ${path}: ${err.message}`);
+              console.error(\`Failed to take screenshot \${filename}: \${err.message}\`);
             }
           }
 
-          async function visitRumble(videoUrl) {
-            console.log(`Launching browser to visit ${videoUrl}...`);
+          /**
+           * Kills openvpn, picks a random .ovpn from /tmp/pia, reconnects, waits for tun0.
+           * Returns true if successful, else false.
+           */
+          async function reconnectVPN() {
+            console.log('Attempting to reconnect PIA VPN with a different server...');
+            try {
+              // Kill any existing openvpn
+              execSync('sudo killall openvpn || true', { stdio: 'inherit' });
+
+              // Randomly pick a .ovpn file from /tmp/pia
+              const piaDir = '/tmp/pia';
+              const ovpnFiles = fs.readdirSync(piaDir).filter(f => f.endsWith('.ovpn'));
+              if (ovpnFiles.length === 0) {
+                throw new Error(\`No .ovpn files found in \${piaDir}\`);
+              }
+
+              const randomIndex = Math.floor(Math.random() * ovpnFiles.length);
+              const chosenOvpn = ovpnFiles[randomIndex];
+              const chosenPath = path.join(piaDir, chosenOvpn);
+              console.log(\`Randomly selected server config: \${chosenPath}\`);
+
+              // Ensure 'auth-user-pass /tmp/pia/auth.txt' is present
+              let contents = fs.readFileSync(chosenPath, 'utf8');
+              if (!contents.includes('auth-user-pass /tmp/pia/auth.txt')) {
+                contents = contents.replace('auth-user-pass', 'auth-user-pass /tmp/pia/auth.txt');
+                contents += '\\ndhcp-option DNS 8.8.8.8\\ndhcp-option DNS 8.8.4.4\\n';
+                fs.writeFileSync(chosenPath, contents, 'utf8');
+              }
+
+              // Start openvpn in the background
+              execSync(\`sudo openvpn --config "\${chosenPath}" --daemon --log /workspace/openvpn_reconnect.log\`, { stdio: 'inherit' });
+
+              // Wait for tun0
+              let i = 0;
+              for (; i < 12; i++) {
+                await sleep(5000);
+                try {
+                  const ifconfig = execSync('ip a').toString();
+                  if (ifconfig.includes('tun0')) {
+                    console.log('tun0 interface is up!');
+                    break;
+                  }
+                } catch (err) {}
+              }
+              if (i === 12) {
+                throw new Error('VPN reconnect timed out: tun0 not found');
+              }
+
+              // Manually set DNS
+              execSync('echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf', { stdio: 'inherit' });
+              execSync('echo "nameserver 8.8.4.4" | sudo tee -a /etc/resolv.conf', { stdio: 'inherit' });
+
+              // Print new IP
+              const newIP = execSync('curl -s https://api.ipify.org').toString().trim();
+              console.log(\`New VPN IP: \${newIP}\`);
+              return true;
+            } catch (err) {
+              console.error('Failed to reconnect VPN:', err.message);
+              return false;
+            }
+          }
+
+          async function visitRumble(videoUrl, attempt = 1) {
+            console.log(\`[Attempt #\${attempt}] Launching browser to visit \${videoUrl}...\`);
             const browser = await puppeteer.launch({
               headless: 'new',
               executablePath: require('puppeteer').executablePath(),
               args: ['--no-sandbox', '--disable-setuid-sandbox'],
             });
 
-            const page = await browser.newPage();
-            await page.setUserAgent(
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36'
-            );
-            await page.setCacheEnabled(false);
+            try {
+              const page = await browser.newPage();
+              await page.setUserAgent(
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/133.0.0.0 Safari/537.36'
+              );
+              await page.setCacheEnabled(false);
 
-            console.log('Navigating to Rumble video...');
-            await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-            await sleep(3000);
-            await safeScreenshot(page, `./screenshots/rumble_landing_${Date.now()}.png`);
+              console.log('Navigating to Rumble video...');
+              await page.goto(videoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+              await sleep(3000);
+              await safeScreenshot(page, \`./screenshots/rumble_landing_\${Date.now()}.png\`);
 
-            const playButtonSelectors = [
-              '.bigPlayUIInner.ctp',
-              'button[aria-label="Play"]',
-              '.vjs-big-play-button',
-              '.icon-play',
-              'div[class*=play]'
-            ];
+              const playButtonSelectors = [
+                '.bigPlayUIInner.ctp',
+                'button[aria-label="Play"]',
+                '.vjs-big-play-button',
+                '.icon-play',
+                'div[class*=play]'
+              ];
 
-            let playButton = null;
-            for (const selector of playButtonSelectors) {
-              playButton = await page.$(selector);
-              if (playButton) {
-                console.log(`Play button found using selector: ${selector}`);
-                await playButton.click();
-                await sleep(3000);
-                await safeScreenshot(
-                  page,
-                  `./screenshots/rumble_play_clicked_${Date.now()}.png`
-                );
-                break;
+              let playButton = null;
+              for (const selector of playButtonSelectors) {
+                playButton = await page.$(selector);
+                if (playButton) {
+                  console.log(\`Play button found using selector: \${selector}\`);
+                  await playButton.click();
+                  await sleep(3000);
+                  await safeScreenshot(page, \`./screenshots/rumble_play_clicked_\${Date.now()}.png\`);
+                  break;
+                }
               }
+
+              if (!playButton) {
+                console.warn('Play button not found. Proceeding without clicking.');
+              }
+
+              // Watch for 30s, checking every 5s
+              for (let t = 5; t <= 30; t += 5) {
+                await sleep(5000);
+                await safeScreenshot(page, \`./screenshots/rumble_watch_\${t}s_\${Date.now()}.png\`);
+
+                // Check if video is playing
+                const isPlaying = await page.evaluate(() => {
+                  const video = document.querySelector('video');
+                  return video && !video.paused && !video.ended && video.readyState > 2;
+                });
+                console.log(\`Video playing status at \${t}s: \${isPlaying}\`);
+
+                // If not playing, reconnect + retry (up to 3 attempts)
+                if (!isPlaying) {
+                  console.log('Video is NOT playing. Reconnecting VPN and retrying...');
+                  await browser.close();
+                  const reconnected = await reconnectVPN();
+                  if (!reconnected) {
+                    throw new Error('VPN reconnect failed. Aborting.');
+                  }
+                  if (attempt < 3) {
+                    return visitRumble(videoUrl, attempt + 1);
+                  } else {
+                    throw new Error('Max attempts reached. Aborting after multiple VPN reconnects.');
+                  }
+                }
+              }
+
+              // Save final HTML
+              const finalHtml = await page.content();
+              fs.writeFileSync(\`./logs/final_page_\${Date.now()}.html\`, finalHtml);
+              console.log('Visit completed successfully');
+            } catch (err) {
+              console.error('Error in visit:', err.message);
+              throw err;
+            } finally {
+              await browser.close();
             }
-
-            if (!playButton) {
-              console.warn('Play button not found. Proceeding without clicking.');
-            }
-
-            // Watch for 30s, taking screenshots in 5s intervals
-            for (let t = 5; t <= 30; t += 5) {
-              await sleep(5000);
-              await safeScreenshot(page, `./screenshots/rumble_watch_${t}s_${Date.now()}.png`);
-
-              const isPlaying = await page.evaluate(() => {
-                const video = document.querySelector('video');
-                return video && !video.paused && !video.ended && video.readyState > 2;
-              });
-              console.log(`Video playing status at ${t}s: ${isPlaying}`);
-            }
-
-            // Save final HTML
-            const finalHtml = await page.content();
-            fs.writeFileSync(`./logs/final_page_${Date.now()}.html`, finalHtml);
-
-            await browser.close();
-            console.log('Visit completed successfully');
           }
 
           async function main() {
@@ -212,7 +296,7 @@ jobs:
               const videoUrl = process.argv[2] || 'https://rumble.com/v6r0vz6-automate.html';
               await visitRumble(videoUrl);
             } catch (error) {
-              console.error('Error in script:', error);
+              console.error('Script failed:', error.message);
               process.exit(1);
             }
           }
