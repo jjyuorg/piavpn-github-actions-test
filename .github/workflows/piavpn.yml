@@ -204,7 +204,7 @@ jobs:
               return true;
             } catch (err) {
               console.error('Failed to reconnect VPN:', err.message);
-              return false;
+              return reconnectVPN();
             }
           }
 
@@ -267,9 +267,10 @@ jobs:
                 if (!isPlaying) {
                   console.log('Video is NOT playing. Reconnecting VPN and retrying...');
                   await browser.close();
-                  const reconnected = await reconnectVPN();
-                  if (!reconnected) {
-                    throw new Error('VPN reconnect failed. Aborting.');
+                  let reconnected = await reconnectVPN();
+                  while (!reconnected) {
+                    reconnected = await reconnectVPN();
+                    throw new Error('VPN reconnect failed. Retrying.');
                   }
                   // No max attempt limit – just keep recursing
                   return visitRumble(videoUrl, attempt + 1);
