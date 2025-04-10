@@ -283,6 +283,9 @@ jobs:
               console.log('Visit completed successfully');
             } catch (err) {
               console.error('Error in visit:', err.message);
+              console.log('Detected a navigation error. Restarting loop after reconnecting VPN...');
+              await reconnectVPN();
+              return visitRumble(videoUrl, attempt + 1);
               throw err;
             } finally {
               await browser.close();
