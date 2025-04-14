@@ -3,7 +3,7 @@ name: Rumble Visit with VPN in Container
 on:
   push:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/59 * * * *'
   workflow_dispatch:
     inputs:
       video_url:
